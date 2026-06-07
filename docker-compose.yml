@@ -1,0 +1,15 @@
+services:
+  enlil:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    environment:
+      - ENLIL_DB=/app/data/enlil.db
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
