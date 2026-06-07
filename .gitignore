@@ -1,0 +1,30 @@
+# Entorno
+.env
+*.pyc
+__pycache__/
+*.pyo
+.venv/
+venv/
+
+# Datos locales (no versionar)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Claves PQ (NUNCA versionar)
+*.key
+enlil_pq.key
+
+# Logs y benchmarks
+*.log
+benchmark*.log
+
+# Backups generados
+*.bak
+*.bak.*
+
+# Build
+dist/
+build/
+*.egg-info/
