@@ -127,3 +127,17 @@ Ver LICENSE.
 - liboqs (ML-DSA-87 / NIST FIPS 204) -- https://github.com/open-quantum-safe/liboqs
 - Qdrant -- https://qdrant.tech
 - SQLite -- https://sqlite.org
+
+
+---
+
+## Companion Project: AEGIS
+
+ENLIL deliberates. **AEGIS defends.**
+
+[AEGIS](https://github.com/conchaestradamiguelangel-droid/aegis) is an autonomous 9-layer post-quantum cyber-defense system. When AEGIS detects a threat, ENLIL provides the strategic judgment — documented, signed, auditable. Together they form a full autonomous security intelligence stack.
+
+- Autonomous threat detection and response
+- ML-KEM-1024, ML-DSA-87, SPHINCS+ (NIST FIPS 203/204/205)
+- GPL v3 — same license as ENLIL
+- Live: https://aegis-pq.com
