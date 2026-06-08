@@ -605,7 +605,7 @@ class Council:
             )
 
         import openai as _oai
-        for _max_tok in (3000, 1500, 800):
+        for _max_tok in (6000, 3000, 1500):
             try:
                 resp = await asyncio.wait_for(
                     synthesis_client.chat.completions.create(
