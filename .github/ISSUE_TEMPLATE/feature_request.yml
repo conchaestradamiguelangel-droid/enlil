@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a new god, capability, or improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      placeholder: Describe the use case or gap you are hitting
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      placeholder: Describe what you would like to see
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: This keeps ENLIL self-hostable (no mandatory cloud dependency)
+          required: true
+        - label: This does not break the post-quantum signing chain
+          required: false

@@ -1,0 +1,38 @@
+name: Bug report
+description: Something is not working as expected
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: ENLIL version
+      description: Run  or check your docker image tag
+      placeholder: e.g. 71b85d0
+    validations:
+      required: true
+  - type: textarea
+    id: query
+    attributes:
+      label: Query that triggered the bug
+      placeholder: Paste the query you sent to /query
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include error messages, truncated output, or wrong synthesis
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: \'journalctl -u enlil -n 50\' or \'docker compose logs enlil\'
+      render: shell
