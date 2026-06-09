@@ -614,7 +614,7 @@ async def solicitar_acceso(request: Request):
         from fastapi.responses import JSONResponse
         return JSONResponse({"ok": False, "error": "Nombre y email requeridos"}, status_code=400)
 
-    tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "REDACTED_TOKEN")
+    tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     tg_chat = os.getenv("TELEGRAM_CHAT_ID", "1025881720")
     msg = (
         f"NUEVO LEAD ENLIL\n"
