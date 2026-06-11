@@ -207,3 +207,25 @@ class TestDashboard:
         resp = c.get("/")
         assert "queryInput" in resp.text
         assert "Convocar el Consejo" in resp.text
+
+class TestHealthEndpoint:
+    def test_health_returns_200(self, client):
+        c, _ = client
+
+        resp = c.get("/health")
+
+        assert resp.status_code == 200
+
+    def test_health_response_structure(self, client):
+        c, _ = client
+
+        resp = c.get("/health")
+        data = resp.json()
+
+        for field in [
+            "status",
+            "council_mode",
+            "qdrant_active",
+            "decree_count",
+        ]:
+            assert field in data
