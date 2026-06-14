@@ -53,8 +53,22 @@ class AnuQuantumGod:
         return prob > 0.5, round(prob, 3)
 
     def analyze(self, query: str, domain: str = "general") -> GodResponse:
+        """Consults ANU on quantum-inspired uncertainty and long-term implications.
+    
+        ANU represents the sky god perspective in the ENLIL council. It evaluates
+        entropy, uncertainty, and probabilistic outcomes using simulated quantum
+        circuits to provide a deliberation.
+    
+        Args:
+            query: The user's question or request to analyze.
+            domain: The analysis domain, such as security, technical, legal,
+                or general.
+    
+        Returns:
+            A GodResponse containing ANU's deliberation and analysis results.
+        """
         t0 = time.monotonic()
-
+    
         bits = self._qrng(8)
         entropy, entropy_pct = self._entropy()
         oracle_ok, oracle_prob = self._oracle(query)
