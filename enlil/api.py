@@ -11,7 +11,8 @@ from enlil.auth import (
     all_clients_usage, client_usage_log, log_usage,
     monthly_tokens_used,
 )
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
+import json as _json
 from pydantic import BaseModel
 from typing import Optional
 
@@ -91,6 +92,35 @@ async def run_query(req: QueryRequest, client: dict = Depends(require_auth)):
             for v in decree.voices
         ],
     }
+
+
+@app.post("/query/stream")
+async def run_query_stream(req: QueryRequest, client: dict = Depends(require_auth)):
+    async def _gen():
+        try:
+            async for ev in _get_enlil().query_stream(
+                req.query, req.context, req.budget_tier, req.parent_decree_id,
+                client_id=client["id"],
+            ):
+                data = _json.loads(ev)
+                if data["type"] == "done":
+                    log_usage(
+                        client_id=client["id"],
+                        decree_id=data["decree_id"],
+                        tokens=data["total_tokens"],
+                        budget_tier=data["budget_tier"],
+                        gods_count=len(data["gods_convened"]),
+                        query_preview=req.query,
+                    )
+                yield "data: " + ev + "\n\n"
+        except Exception as exc:
+            _err = _json.dumps({"type": "error", "message": str(exc)})
+            yield "data: " + _err + "\n\n"
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/feedback/{decree_id}")

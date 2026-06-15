@@ -189,6 +189,116 @@ class Orchestrator:
         self.rl.update_policy(self.pantheon)
         return {"ok": True, "message": "Policy update completado"}
 
+
+    async def query_stream(
+        self,
+        text: str,
+        context: str = "",
+        budget_tier: str | None = None,
+        parent_decree_id: str | None = None,
+        client_id: str = "default",
+    ):
+        """Async generator -- yields JSON strings for SSE events."""
+        import json as _json
+        domains = classify_query(text)
+        budget = resolve_budget(text, budget_tier)
+
+        predicted_scores: dict[str, float] = {}
+        if domains:
+            for _name in self.pantheon:
+                _avg_w = sum(self.rl.get_policy_weight(_name, d) for d in domains) / len(domains)
+                predicted_scores[_name] = round((_avg_w / 2.0) * 10.0, 2)
+
+        god_names = select_gods(domains, self.pantheon, budget.tier)
+
+        if self.qdrant.is_available:
+            memory_context = self.qdrant.search(text, limit=3)
+        else:
+            memory_context = self.memory.search(text, limit=3)
+        if memory_context:
+            context = context + "\n\nDecretos anteriores relevantes:\n" + memory_context
+
+        if self.corpus:
+            corpus_context = self.corpus.search(text, limit=2)
+            if corpus_context:
+                context = context + "\n\nSabiduria ancestral del panteon:\n" + corpus_context
+
+        domain_set = set(domains)
+        if "legal" in domain_set:
+            god_overrides = LEGAL_GOD_OVERRIDES
+        elif "security" in domain_set:
+            god_overrides = CYBER_GOD_OVERRIDES
+        else:
+            god_overrides = None
+
+        doc_id = None
+        if context and len(context) > RAG_THRESHOLD and self.rag.is_available:
+            doc_id = self.rag.ingest(context)
+
+        yield _json.dumps({"type": "init", "gods": god_names, "domains": domains, "budget_tier": budget.tier})
+
+        responses = []
+        async for god_resp in self.council.convene_stream(god_names, text, context, god_overrides=god_overrides, doc_id=doc_id):
+            responses.append(god_resp)
+            yield _json.dumps({
+                "type": "god",
+                "god": god_resp.god_name,
+                "content": god_resp.content,
+                "tokens": god_resp.tokens_used,
+                "latency_ms": god_resp.latency_ms,
+                "dissent": god_resp.dissent,
+                "model": god_resp.model,
+            })
+
+        synthesis_parts = []
+        async for chunk in self.council.synthesize_stream(responses, text, budget_tier=budget.tier):
+            synthesis_parts.append(chunk)
+            yield _json.dumps({"type": "synthesis_chunk", "text": chunk})
+
+        synthesis = "".join(synthesis_parts)
+
+        voices = [
+            GodVoice(
+                god_name=r.god_name, model=r.model, content=r.content,
+                tokens_used=r.tokens_used, latency_ms=r.latency_ms, dissent=r.dissent,
+            )
+            for r in responses
+        ]
+        decree = Decree(
+            query=text, domains=domains, gods_convened=god_names,
+            voices=voices, synthesis=synthesis,
+            total_tokens=sum(r.tokens_used for r in responses),
+            budget_tier=budget.tier, parent_decree_id=parent_decree_id,
+            predicted_scores=predicted_scores,
+        )
+        self.store.save(decree, client_id=client_id)
+        _latency = sum(v.latency_ms for v in decree.voices)
+        _domain = decree.domains[0] if decree.domains else "general"
+        record_decree(decree.budget_tier, _domain, _latency, decree.total_tokens)
+        with span("enlil.query", decree_id=decree.id, budget_tier=decree.budget_tier,
+                  domain=_domain, gods_count=len(decree.gods_convened),
+                  total_tokens=decree.total_tokens, latency_ms=round(_latency, 1)):
+            pass
+        self.memory.store(decree)
+        if self.qdrant.is_available:
+            self.qdrant.store(decree)
+        self.meta.observe(decree)
+        apply_decay(god_names, self.pantheon)
+        task = asyncio.create_task(self._evaluate_and_learn(decree))
+        task.add_done_callback(_on_eval_done)
+
+        yield _json.dumps({
+            "type": "done",
+            "decree_id": decree.id,
+            "domains": decree.domains,
+            "gods_convened": decree.gods_convened,
+            "total_tokens": decree.total_tokens,
+            "budget_tier": decree.budget_tier,
+            "has_dissent": decree.has_dissent(),
+            "dissenting_gods": decree.dissenting_gods(),
+            "pq_signed": bool(decree.pq_signature),
+        })
+
     def system_mode(self) -> dict:
         """Estado del sistema: modo activo, modelos, Qdrant."""
         gods_models = {
