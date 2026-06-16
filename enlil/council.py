@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from datetime import date
 import collections
@@ -5,7 +7,10 @@ import logging
 import re
 import time
 import os
+from typing import AsyncIterator, Optional
+from openai.types.chat import ChatCompletionMessageParam
 from .gods.base import GodProfile, GodResponse
+from .document_rag import DocumentRAGStore
 from .gods.registry import GOD_TIMEOUTS
 from .chunker import chunk_for_god, CHUNK_THRESHOLD
 from .document_rag import RAG_THRESHOLD
@@ -50,7 +55,7 @@ def _get_db_path() -> str:
     import os
     return os.environ.get("ENLIL_DB", "./data/enlil.db")
 
-def _ensure_perspective_table():
+def _ensure_perspective_table() -> None:
     try:
         with _sqlite3.connect(_get_db_path()) as conn:
             conn.execute("""
@@ -81,7 +86,7 @@ def _get_best_perspective(god_name: str, query_type: str) -> str:
     except Exception:
         return ""
 
-def _store_perspective(decree_id: str, god_name: str, query_type: str, perspective: str):
+def _store_perspective(decree_id: str, god_name: str, query_type: str, perspective: str) -> None:
     try:
         _ensure_perspective_table()
         with _sqlite3.connect(_get_db_path()) as conn:
@@ -128,7 +133,7 @@ class _CircuitBreaker:
     OPEN      = "open"
     HALF_OPEN = "half_open"
 
-    def __init__(self, threshold: int = 3, window: float = 60.0, recovery: float = 30.0):
+    def __init__(self, threshold: int = 3, window: float = 60.0, recovery: float = 30.0) -> None:
         self.threshold = threshold
         self.window    = window
         self.recovery  = recovery
@@ -146,7 +151,7 @@ class _CircuitBreaker:
             return True
         return False  # HALF_OPEN: deja pasar
 
-    def record_failure(self):
+    def record_failure(self) -> None:
         now = time.monotonic()
         self._failures.append(now)
         while self._failures and self._failures[0] < now - self.window:
@@ -155,7 +160,7 @@ class _CircuitBreaker:
             self._state    = self.OPEN
             self._opened_at = now
 
-    def record_success(self):
+    def record_success(self) -> None:
         self._failures.clear()
         self._state = self.CLOSED
 
@@ -255,7 +260,7 @@ _LECTOR_MODELS = {
 
 
 class Council:
-    def __init__(self, pantheon: dict[str, GodProfile], rag_store=None):
+    def __init__(self, pantheon: dict[str, GodProfile], rag_store: Optional[DocumentRAGStore] = None) -> None:
         self.pantheon = pantheon
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -272,6 +277,7 @@ class Council:
                 default_headers={"anthropic-version": "2023-06-01"},
             )
 
+        self._client: AsyncOpenAI
         if openrouter_key:
             self._openrouter_client = AsyncOpenAI(
                 base_url="https://openrouter.ai/api/v1",
@@ -280,6 +286,7 @@ class Council:
             self._client = self._openrouter_client
             self.mode = "openrouter"
         elif anthropic_key:
+            assert self._anthropic_client is not None
             self._client = self._anthropic_client
             self.mode = "anthropic"
         else:
@@ -326,7 +333,7 @@ class Council:
         system_extra: str = "",
         max_tokens: int = 1024,
         timeout: float = 45.0,
-        doc_id: str = None,
+        doc_id: Optional[str] = None,
         original_context: str = "",
     ) -> GodResponse:
         god = self.pantheon[god_name]
@@ -391,7 +398,7 @@ class Council:
                 system += f"\n\nContexto relevante:\n{effective_ctx}"
 
         model = self._resolve_model(god.model)
-        messages = [
+        messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": system},
             {"role": "user", "content": query},
         ]
@@ -470,7 +477,7 @@ class Council:
 
     async def _consult_god_safe(
         self, name: str, query: str, context: str, system_extra: str = "",
-        max_tokens: int = 1024, doc_id: str = None, original_context: str = "",
+        max_tokens: int = 1024, doc_id: Optional[str] = None, original_context: str = "",
     ) -> GodResponse:
         try:
             god_timeout = GOD_TIMEOUTS.get(name, 45.0)
@@ -511,9 +518,9 @@ class Council:
         god_names: list[str],
         query: str,
         context: str = "",
-        god_overrides: dict | None = None,
+        god_overrides: Optional[dict] = None,
         max_tokens: int = 2048,
-        doc_id: str = None,
+        doc_id: Optional[str] = None,
     ) -> list[GodResponse]:
         overrides = god_overrides or {}
 
@@ -629,20 +636,21 @@ class Council:
             except (asyncio.TimeoutError, Exception) as _exc:
                 self._synthesis_circuit.record_failure()
                 raise
+        raise RuntimeError("Sintesis agoto los reintentos de presupuesto sin exito ni excepcion")
 
     async def convene_stream(
         self,
         god_names: list[str],
         query: str,
         context: str = "",
-        god_overrides: dict | None = None,
+        god_overrides: Optional[dict] = None,
         max_tokens: int = 2048,
-        doc_id: str = None,
-    ):
+        doc_id: Optional[str] = None,
+    ) -> AsyncIterator[GodResponse]:
         """Yield de cada GodResponse cuando termina, en orden de llegada."""
         overrides = god_overrides or {}
         valid_names = [n for n in god_names if n in self.pantheon]
-        result_queue = asyncio.Queue()
+        result_queue: asyncio.Queue[GodResponse] = asyncio.Queue()
 
         # El Lector: digest para docs grandes
         if context and len(context) > LECTOR_THRESHOLD:
@@ -712,7 +720,7 @@ class Council:
         responses: list[GodResponse],
         query: str,
         budget_tier: str = "standard",
-    ):
+    ) -> AsyncIterator[str]:
         """Yield de cada chunk de texto de la sintesis en streaming."""
         successful = [r for r in responses if r.content and not r.dissent]
         if not successful:
