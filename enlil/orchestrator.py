@@ -39,9 +39,10 @@ class Orchestrator:
         self.store = DecreeStore(connection=self._db)
         self.reputation = ReputationStore(connection=self._db)
         self.memory = MemoryStore(connection=self._db)
-        # Qdrant embedded desactivado por consumo de RAM. Usar QDRANT_URL para servidor externo.
+        #  Qdrant: embedded si QDRANT_PATH, servidor si QDRANT_URL.
         qdrant_url = os.environ.get("QDRANT_URL", "")
-        self.qdrant = QdrantMemoryStore(path="", url=qdrant_url)
+        qdrant_path = os.environ.get("QDRANT_PATH", "")
+        self.qdrant = QdrantMemoryStore(path=qdrant_path, url=qdrant_url)
         from .corpus import CorpusStore
         self.corpus = CorpusStore.from_qdrant_store(self.qdrant)
         self.rag = DocumentRAGStore(self.qdrant)
