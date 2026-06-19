@@ -1,12 +1,14 @@
 import asyncio
+import hmac
 import io
 import os
 from contextlib import asynccontextmanager
+from uuid import UUID
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Header, Request, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Literal, Optional
 
 load_dotenv()
 
@@ -54,6 +56,25 @@ class QueryRequest(BaseModel):
 
 class FeedbackRequest(BaseModel):
     useful: bool
+
+
+class TaskPayload(BaseModel):
+    type: Literal["analisis", "sintesis", "consulta", "verificacion"]
+    input: str = Field(..., min_length=1, max_length=8000)
+    language: Literal["es", "en"] = "es"
+
+
+class TaskContext(BaseModel):
+    reason: str = Field(default="", max_length=500)
+    allowed_fields: list[str] = Field(default_factory=list)
+
+
+class EkurhiveTaskRequest(BaseModel):
+    request_id: UUID
+    connection_id: UUID
+    sender_node_id: str = Field(..., min_length=1, max_length=100)
+    task: TaskPayload
+    context: TaskContext | None = None
 
 
 # --- API ---
@@ -596,6 +617,54 @@ async def get_stats(_=Depends(require_master)):
         "domain_distribution": domain_counts,
     }
 
+
+
+async def require_ekurhive_task_auth(authorization: str | None = Header(default=None)):
+    expected = os.getenv("ENLIL_EKURHIVE_TASK_KEY", "")
+    if not authorization or not expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not hmac.compare_digest(authorization, f"Bearer {expected}"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.post("/task")
+async def ekurhive_task(req: EkurhiveTaskRequest, _=Depends(require_ekurhive_task_auth)):
+    try:
+        decree = await asyncio.wait_for(
+            _get_enlil().query(
+                req.task.input,
+                req.context.reason if req.context else "",
+                "standard",
+                None,
+            ),
+            timeout=60,
+        )
+        return {
+            "request_id": str(req.request_id),
+            "agent_id": "node-enlil-001",
+            "result": decree.synthesis,
+            "status": "completed",
+            "processing_time_ms": None,
+            "error": None,
+        }
+    except asyncio.TimeoutError:
+        return {
+            "request_id": str(req.request_id),
+            "agent_id": "node-enlil-001",
+            "result": None,
+            "status": "failed",
+            "processing_time_ms": None,
+            "error": "timeout",
+        }
+    except Exception:
+        return {
+            "request_id": str(req.request_id),
+            "agent_id": "node-enlil-001",
+            "result": None,
+            "status": "failed",
+            "processing_time_ms": None,
+            "error": "internal_error",
+        }
 
 
 @app.post("/solicitar-acceso", include_in_schema=False)
