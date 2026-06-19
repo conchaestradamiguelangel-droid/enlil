@@ -634,10 +634,10 @@ async def ekurhive_task(req: EkurhiveTaskRequest, _=Depends(require_ekurhive_tas
             _get_enlil().query(
                 req.task.input,
                 req.context.reason if req.context else "",
-                "standard",
+                "minimal",
                 None,
             ),
-            timeout=60,
+            timeout=120,
         )
         return {
             "request_id": str(req.request_id),
