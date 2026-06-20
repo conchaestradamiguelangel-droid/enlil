@@ -2,6 +2,8 @@
 
 9 modelos de IA deliberando en paralelo. Cada decision firmada con criptografia post-cuantica.
 
+**Live dashboard (decretos reales en produccion):** https://enlil-council.com/dashboard
+
 ENLIL convoca un consejo de 9 modelos especializados (Claude, DeepSeek, Gemini, Mistral, Qwen, Llama, Grok) para analizar cualquier consulta desde angulos complementarios: tecnico, legal, estrategico, adversarial, creativo. El resultado es un Decreto: un documento estructurado con el razonamiento de cada dios, una sintesis final y una firma ML-DSA-87 irrevocable.
 
 ---
@@ -41,43 +43,57 @@ ENLIL convoca un consejo de 9 modelos especializados (Claude, DeepSeek, Gemini, 
 
 ## Inicio rapido
 
-    git clone https://github.com/enlil-council/enlil.git
-    cd enlil
-    cp .env.example .env
-    # Edita .env: anade tu OPENROUTER_API_KEY y una ENLIL_MASTER_KEY segura
-    docker-compose up -d
+```bash
+git clone https://github.com/conchaestradamiguelangel-droid/enlil.git
+cd enlil
+cp .env.example .env
+# Edita .env: anade tu OPENROUTER_API_KEY y una ENLIL_MASTER_KEY segura
+docker-compose up -d
+```
 
 El Consejo arranca en http://localhost:8002.
 
 ### Crear tu primer cliente
 
-    curl -X POST http://localhost:8002/admin/clients       -H 'X-Master-Key: TU_ENLIL_MASTER_KEY'       -H 'Content-Type: application/json'       -d '{name:yo,email:tu@email.com,plan:standard}'
+```bash
+curl -X POST http://localhost:8002/admin/clients \
+  -H "X-Master-Key: TU_ENLIL_MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"yo","email":"tu@email.com","plan":"standard"}'
+```
 
 ### Lanzar un Decreto
 
-    curl -X POST http://localhost:8002/query       -H 'X-Api-Key: enlil_TU_API_KEY'       -H 'Content-Type: application/json'       -d '{query:Riesgos de adoptar IA generativa con datos sensibles}'
+```bash
+curl -X POST http://localhost:8002/query \
+  -H "X-Api-Key: enlil_TU_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"Riesgos de adoptar IA generativa con datos sensibles"}'
+```
 
 ---
 
 ## Estructura del proyecto
 
-    enlil/
-    -- docker-compose.yml     # Enlil + Qdrant
-    -- Dockerfile
-    -- .env.example
-    -- requirements.txt
-    -- main.py
-    -- api.py
-    -- enlil/
-       -- auth.py             # Autenticacion, rate limiting, uso
-       -- council.py          # Motor de deliberacion paralela
-       -- orchestrator.py     # Orquestacion: classify, route, sign, store
-       -- quantum.py          # Firma ML-DSA-87 (liboqs)
-       -- export.py           # Exportacion a PDF/HTML
-       -- document_rag.py     # RAG para documentos largos
-       -- gods/
-          -- registry.py      # Los 9 dioses y sus perfiles
-          -- base.py          # Tipos base
+```
+enlil/
+├── docker-compose.yml     # Enlil + Qdrant
+├── Dockerfile
+├── .env.example
+├── requirements.txt
+├── main.py
+├── api.py
+└── enlil/
+   ├── auth.py             # Autenticacion, rate limiting, uso
+   ├── council.py          # Motor de deliberacion paralela
+   ├── orchestrator.py     # Orquestacion: classify, route, sign, store
+   ├── quantum.py          # Firma ML-DSA-87 (liboqs)
+   ├── export.py           # Exportacion a PDF/HTML
+   ├── document_rag.py     # RAG para documentos largos
+   └── gods/
+      ├── registry.py      # Los 9 dioses y sus perfiles
+      └── base.py          # Tipos base
+```
 
 ---
 
@@ -100,16 +116,16 @@ El Consejo arranca en http://localhost:8002.
 
 Cada Decreto incluye una firma ML-DSA-87 en base64. La clave publica esta disponible en GET /public-key.
 
-Para verificar con Python:
-
-    from enlil.quantum import verify_decree
-    valid = verify_decree(
-        decree_id='...',
-        query='...',
-        synthesis='...',
-        timestamp=1234567890.0,
-        signature_b64='...'
-    )
+```python
+from enlil.quantum import verify_decree
+valid = verify_decree(
+    decree_id="...",
+    query="...",
+    synthesis="...",
+    timestamp=1234567890.0,
+    signature_b64="..."
+)
+```
 
 ---
 
@@ -128,16 +144,15 @@ Ver LICENSE.
 - Qdrant -- https://qdrant.tech
 - SQLite -- https://sqlite.org
 
-
 ---
 
 ## Companion Project: AEGIS
 
 ENLIL deliberates. **AEGIS defends.**
 
-[AEGIS](https://github.com/conchaestradamiguelangel-droid/aegis) is an autonomous 9-layer post-quantum cyber-defense system. When AEGIS detects a threat, ENLIL provides the strategic judgment — documented, signed, auditable. Together they form a full autonomous security intelligence stack.
+[AEGIS](https://github.com/conchaestradamiguelangel-droid/aegis) is an autonomous 9-layer post-quantum cyber-defense system. When AEGIS detects a threat, ENLIL provides the strategic judgment -- documented, signed, auditable. Together they form a full autonomous security intelligence stack.
 
 - Autonomous threat detection and response
 - ML-KEM-1024, ML-DSA-87, SPHINCS+ (NIST FIPS 203/204/205)
-- GPL v3 — same license as ENLIL
+- GPL v3 -- same license as ENLIL
 - Live: https://aegis-pq.com
