@@ -99,7 +99,7 @@ class Orchestrator:
         if context and len(context) > RAG_THRESHOLD and self.rag.is_available:
             doc_id = self.rag.ingest(context)
         responses: list[GodResponse] = await self.council.convene(god_names, text, context, god_overrides=god_overrides, doc_id=doc_id, global_system_extra=system_extra)
-        synthesis = await self.council.synthesize(responses, text, budget_tier=budget.tier)
+        synthesis = await self.council.synthesize(responses, text, budget_tier=budget.tier, system_extra=system_extra)
 
         voices = [
             GodVoice(

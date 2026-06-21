@@ -583,6 +583,7 @@ class Council:
         responses: list[GodResponse],
         query: str,
         budget_tier: str = "standard",
+        system_extra: str = "",
     ) -> str:
         successful = [r for r in responses if r.content and not r.dissent]
         if not successful:
@@ -624,7 +625,7 @@ class Council:
                     synthesis_client.chat.completions.create(
                         model=synthesis_model,
                         messages=[
-                            {"role": "system", "content": _SYNTHESIS_SYSTEM},
+                            {"role": "system", "content": _SYNTHESIS_SYSTEM + (chr(10) + system_extra if system_extra else "")},
                             {"role": "user", "content": synthesis_prompt},
                         ],
                         max_tokens=_max_tok,

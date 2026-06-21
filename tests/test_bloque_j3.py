@@ -148,3 +148,24 @@ class TestModelValidation:
         assert ctx.relationship.last_result is None
         assert ctx.relationship.outcomes.success == 0
         assert ctx.target.trust_score is None
+
+
+class TestSynthesizeReceivesDirective:
+    def test_synthesize_signature_accepts_system_extra(self):
+        import inspect
+        from enlil.council import Council
+        sig = inspect.signature(Council.synthesize)
+        assert 'system_extra' in sig.parameters, 'synthesize() no acepta system_extra'
+
+    def test_synthesize_system_extra_default_is_empty(self):
+        import inspect
+        from enlil.council import Council
+        sig = inspect.signature(Council.synthesize)
+        assert sig.parameters['system_extra'].default == '', 'default debe ser string vacio'
+
+    def test_signal_produces_directiva_in_system_extra(self):
+        ctx = _ctx(completed_activations=0)
+        signal = _derive_context_signal(ctx)
+        directiva = _CONTEXT_DIRECTIVES.get(signal, '')
+        assert directiva != '', 'HISTORIAL_INSUFICIENTE debe producir directiva no vacia'
+        assert 'insuficiente' in directiva.lower() or 'falta' in directiva.lower()
