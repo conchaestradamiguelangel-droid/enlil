@@ -259,6 +259,11 @@ _LECTOR_MODELS = {
 }
 
 
+def _merge_system_extra(global_extra: str, per_god_extra: str) -> str:
+    parts = [p for p in (global_extra, per_god_extra) if p]
+    return chr(10).join(parts)
+
+
 class Council:
     def __init__(self, pantheon: dict[str, GodProfile], rag_store: Optional[DocumentRAGStore] = None) -> None:
         self.pantheon = pantheon
@@ -521,6 +526,7 @@ class Council:
         god_overrides: Optional[dict] = None,
         max_tokens: int = 2048,
         doc_id: Optional[str] = None,
+        global_system_extra: str = "",
     ) -> list[GodResponse]:
         overrides = god_overrides or {}
 
@@ -544,7 +550,7 @@ class Council:
                 name, query, god_context,
                 doc_id=doc_id,
                 original_context=original_context,
-                system_extra=overrides.get(name, {}).get("system_extra", ""),
+                system_extra=_merge_system_extra(global_system_extra, overrides.get(name, {}).get("system_extra", "")),
                 max_tokens=max_tokens,
             )
             for name in god_names
