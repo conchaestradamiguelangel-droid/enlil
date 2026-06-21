@@ -169,3 +169,88 @@ class TestSynthesizeReceivesDirective:
         directiva = _CONTEXT_DIRECTIVES.get(signal, '')
         assert directiva != '', 'HISTORIAL_INSUFICIENTE debe producir directiva no vacia'
         assert 'insuficiente' in directiva.lower() or 'falta' in directiva.lower()
+
+
+class TestSynthesizeInjectsDirectiveIntoMessages:
+    """
+    Mock test: verifica que synthesize() inyecta system_extra en messages[0]["content"]
+    junto a _SYNTHESIS_SYSTEM, y que reason no aparece en el mensaje system.
+    Codex finding: los tests previos solo inspeccionaban la firma, no la llamada real.
+    """
+
+    def _make_council(self):
+        from enlil.council import Council
+        from enlil.gods.base import GodProfile
+        god = GodProfile(
+            name="MOCK_GOD", model="test-model", role="mock", domains=["consulta"]
+        )
+        council = Council(pantheon={"MOCK_GOD": god})
+        council._anthropic_client = None
+        return council
+
+    def _fake_response(self, content="Decreto simulado"):
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = content
+        return resp
+
+    def _patch_client(self, council):
+        from unittest.mock import AsyncMock, MagicMock
+        captured = {}
+        fake_resp = self._fake_response()
+
+        async def fake_create(**kwargs):
+            captured["messages"] = kwargs.get("messages", [])
+            return fake_resp
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+        return captured
+
+    def _run(self, council, responses, query, system_extra):
+        import asyncio
+        return asyncio.run(council.synthesize(responses, query, system_extra=system_extra))
+
+    def _responses(self):
+        from enlil.gods.base import GodResponse
+        return [
+            GodResponse(
+                god_name="MOCK_GOD", model="test", content="voz dios",
+                tokens_used=5, latency_ms=10.0
+            )
+        ]
+
+    def test_system_message_role_is_system(self):
+        council = self._make_council()
+        captured = self._patch_client(council)
+        self._run(council, self._responses(), "consulta", "DIRECTIVA_TEST")
+        assert captured["messages"][0]["role"] == "system"
+
+    def test_system_message_contains_directive(self):
+        DIRECTIVE = "DIRECTIVA_CODEX_MOCK_XQ9K"
+        council = self._make_council()
+        captured = self._patch_client(council)
+        self._run(council, self._responses(), "consulta", DIRECTIVE)
+        assert DIRECTIVE in captured["messages"][0]["content"]
+
+    def test_system_message_contains_synthesis_system_base(self):
+        from enlil.council import _SYNTHESIS_SYSTEM
+        council = self._make_council()
+        captured = self._patch_client(council)
+        self._run(council, self._responses(), "consulta", "DIRECTIVA_BASE_TEST")
+        assert _SYNTHESIS_SYSTEM[:60] in captured["messages"][0]["content"]
+
+    def test_reason_not_in_system_message(self):
+        REASON = "RAZON_CONEXION_PRIVADA_XQ9K"
+        council = self._make_council()
+        captured = self._patch_client(council)
+        query_with_reason = (
+            "Tarea del usuario."
+            + chr(10) + chr(10)
+            + "[METADATOS DE CONEXION]"
+            + chr(10) + "Razon: " + REASON + chr(10)
+            + "[FIN METADATOS]"
+        )
+        self._run(council, self._responses(), query_with_reason, "DIRECTIVA_SIN_RAZON")
+        assert REASON not in captured["messages"][0]["content"]
