@@ -132,8 +132,18 @@ class TestTaskBehavior:
         r = c.post("/task", json=_VALID_BODY)
         assert r.status_code == 200
         data = r.json()
-        for field in ("request_id", "agent_id", "result", "status", "processing_time_ms", "error"):
-            assert field in data, f"Campo ausente: {field}"
+        j4_fields = (
+            "request_id", "agent_id", "algorithm", "status",
+            "result", "error", "result_sha3_256", "signature_version",
+            "pq_signature", "key_id",
+        )
+        for field in j4_fields:
+            assert field in data, f"Campo J4 ausente: {field}"
+        assert data["algorithm"] == "ML-DSA-87"
+        assert data["signature_version"] == "1"
+        assert data["pq_signature"] is not None
+        assert data["key_id"] is not None
+        assert len(data["result_sha3_256"]) == 64
 
     def test_request_id_preserved(self, authed_client):
         c, _ = authed_client

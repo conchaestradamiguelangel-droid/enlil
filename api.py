@@ -419,11 +419,13 @@ async def verify_decree(decree_id: str):
 
 @app.get("/quantum")
 async def quantum_status():
-    from enlil.quantum import is_available, public_key_b64
+    from enlil.quantum import is_available, public_key_b64, key_id
     return {
         "pq_available": is_available(),
-        "algorithm": "ML-DSA-87 (NIST FIPS 204)",
+        "algorithm": "ML-DSA-87",
+        "public_key_b64": public_key_b64(),
         "public_key": public_key_b64(),
+        "key_id": key_id(),
         "description": "Todos los Decretos emitidos desde ENLIL S7 están firmados con criptografía post-cuántica irrevocable.",
     }
 
@@ -695,11 +697,41 @@ async def require_ekurhive_task_auth(authorization: str | None = Header(default=
 
 @app.post("/task")
 async def ekurhive_task(req: EkurhiveTaskRequest, _=Depends(require_ekurhive_task_auth)):
+    from enlil.quantum import sign_task_response as _sign
     ctx = req.context
     signal = _derive_context_signal(ctx)
     directiva = _CONTEXT_DIRECTIVES.get(signal, "")
     reason = ctx.connection.reason if ctx else ""
+    connection_id = str(req.connection_id) if req.connection_id else ""
+    sender_node_id = str(req.sender_node_id) if req.sender_node_id else ""
     task_text = _build_task_text(req.task.input, reason)
+
+    def _signed_response(status: str, result: str | None, error: str | None) -> dict:
+        """Construye y firma el payload A2A. HTTP 500 si no puede firmar."""
+        try:
+            sig_b64, kid, result_sha3 = _sign(
+                request_id=str(req.request_id),
+                connection_id=connection_id,
+                sender_node_id=sender_node_id,
+                status=status,
+                result=result,
+                error=error,
+            )
+        except RuntimeError:
+            raise HTTPException(status_code=500, detail="signing_failed")
+        return {
+            "request_id":        str(req.request_id),
+            "agent_id":          "node-enlil-001",
+            "algorithm":         "ML-DSA-87",
+            "status":            status,
+            "result":            result,
+            "error":             error,
+            "result_sha3_256":   result_sha3,
+            "signature_version": "1",
+            "pq_signature":      sig_b64,
+            "key_id":            kid,
+        }
+
     try:
         decree = await asyncio.wait_for(
             _get_enlil().query(
@@ -711,32 +743,13 @@ async def ekurhive_task(req: EkurhiveTaskRequest, _=Depends(require_ekurhive_tas
             ),
             timeout=120,
         )
-        return {
-            "request_id": str(req.request_id),
-            "agent_id": "node-enlil-001",
-            "result": decree.synthesis,
-            "status": "completed",
-            "processing_time_ms": None,
-            "error": None,
-        }
+        return _signed_response("completed", decree.synthesis, None)
     except asyncio.TimeoutError:
-        return {
-            "request_id": str(req.request_id),
-            "agent_id": "node-enlil-001",
-            "result": None,
-            "status": "failed",
-            "processing_time_ms": None,
-            "error": "timeout",
-        }
+        return _signed_response("failed", None, "timeout")
+    except HTTPException:
+        raise  # signing_failed — re-propagar sin absorber
     except Exception:
-        return {
-            "request_id": str(req.request_id),
-            "agent_id": "node-enlil-001",
-            "result": None,
-            "status": "failed",
-            "processing_time_ms": None,
-            "error": "internal_error",
-        }
+        return _signed_response("failed", None, "internal_error")
 
 
 @app.post("/solicitar-acceso", include_in_schema=False)
