@@ -62,7 +62,31 @@ curl -X POST http://localhost:8002/admin/clients \
   -d '{"name":"yo","email":"tu@email.com","plan":"standard"}'
 ```
 
-### Lanzar un Decreto
+### CLI -- de cero a primer Decreto en 30 segundos
+
+Instala el CLI una vez tras clonar el repo:
+
+```bash
+pip install -e .
+```
+
+Luego configura y consulta:
+
+```bash
+enlil init                                     # URL + API key (una vez)
+enlil "Riesgos de adoptar IA con datos sensibles"  # Decreto en tiempo real
+```
+
+Mas comandos:
+
+```bash
+enlil history          # ultimos 10 decretos
+enlil history -n 20    # ultimos 20
+enlil decree <id>      # ver decreto especifico
+enlil status           # panteon y modelos activos
+```
+
+### Lanzar un Decreto via API (alternativa curl)
 
 ```bash
 curl -X POST http://localhost:8002/query \
