@@ -50,7 +50,8 @@ def cmd_query(args):
         sys.exit(1)
     in_synthesis = False
     try:
-        for event in client.query_stream(cfg["url"], cfg["api_key"], text, getattr(args, "tier", None)):
+        peer_review = getattr(args, "review", False)
+        for event in client.query_stream(cfg["url"], cfg["api_key"], text, getattr(args, "tier", None), peer_review=peer_review):
             etype = event.get("type")
             if etype == "init":
                 render.council_init(event["gods"], event["domains"], event["budget_tier"])
@@ -64,6 +65,10 @@ def cmd_query(args):
                     render.synthesis_start()
                     in_synthesis = True
                 render.synthesis_chunk(event["token"])
+            elif etype == "peer_review_init":
+                render.peer_review_init(event["reviewers"])
+            elif etype == "peer_critique":
+                render.peer_critique(event["god"], event["content"], event["latency_ms"])
             elif etype == "done":
                 render.decree_footer(event)
             elif etype == "error":
@@ -138,6 +143,8 @@ def main():
     p_q.add_argument("query", nargs="+", help="Texto de la consulta")
     p_q.add_argument("--tier", default=None, choices=["light", "standard", "full"],
                      help="Tier de presupuesto (tokens)")
+    p_q.add_argument("--review", action="store_true", default=False,
+                     help="Activar revision de pares: cada dios critica las voces del resto")
 
     p_h = sub.add_parser("history", help="Ultimos decretos")
     p_h.add_argument("-n", type=int, default=10, metavar="N",

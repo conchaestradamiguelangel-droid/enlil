@@ -90,5 +90,23 @@ def single_decree(d: dict) -> None:
     _w()
 
 
+
+def peer_review_init(reviewers: list) -> None:
+    _w()
+    _w(_bar(".", 62))
+    _w(f"  REVISION DE PARES  ({len(reviewers)} revisores)")
+    _w(_bar(".", 62))
+    _w()
+
+
+def peer_critique(god: str, content: str, latency_ms: float) -> None:
+    _w(f"  [{god:<12}]  revision ({latency_ms / 1000:.1f}s)")
+    if content:
+        lines = content.strip().split("\n")
+        for line in lines[:5]:
+            _w(f"             {line}")
+    _w()
+
+
 def err(msg: str) -> None:
     print(f"  Error: {msg}", file=sys.stderr)

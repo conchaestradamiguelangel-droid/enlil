@@ -52,6 +52,7 @@ class QueryRequest(BaseModel):
     budget_tier: str | None = None
     voices_count: int | None = None
     parent_decree_id: str | None = None
+    peer_review: bool = False
 
 
 class FeedbackRequest(BaseModel):
@@ -235,9 +236,24 @@ async def run_query_stream(req: QueryRequest, client: dict = Depends(require_aut
             }
             yield "data: " + _json.dumps(event, ensure_ascii=False) + "\n\n"
 
+        # Fase 2: Peer review (si se solicito)
+        peer_critiques = []
+        if req.peer_review and responses:
+            yield "data: " + _json.dumps({"type": "peer_review_init", "reviewers": [r.god_name for r in responses], "total": len(responses)}, ensure_ascii=False) + "\n\n"
+            async for critique in orch.council.peer_review_stream(responses, text):
+                peer_critiques.append(critique)
+                yield "data: " + _json.dumps({
+                    "type": "peer_critique",
+                    "god": critique.god_name,
+                    "content": critique.content,
+                    "tokens": critique.tokens_used,
+                    "latency_ms": critique.latency_ms,
+                }, ensure_ascii=False) + "\n\n"
+
         synthesis_chunks = []
         async for token in orch.council.synthesize_stream(
-            responses, text, budget_tier=budget.tier
+            responses, text, budget_tier=budget.tier,
+            peer_critiques=peer_critiques if peer_critiques else None,
         ):
             synthesis_chunks.append(token)
             yield "data: " + _json.dumps({"type": "synthesis_token", "token": token}, ensure_ascii=False) + "\n\n"
@@ -274,6 +290,10 @@ async def run_query_stream(req: QueryRequest, client: dict = Depends(require_aut
             "pq_signed": bool(getattr(decree, "pq_signature", None)),
             "total_tokens": total_tokens,
             "gods_convened": [r.god_name for r in responses],
+            "peer_review": [
+                {"god": c.god_name, "content": c.content, "tokens": c.tokens_used}
+                for c in peer_critiques
+            ],
         }
         yield "data: " + _json.dumps(done_event, ensure_ascii=False) + "\n\n"
 

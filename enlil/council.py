@@ -10,6 +10,7 @@ import os
 from typing import AsyncIterator, Optional
 from openai.types.chat import ChatCompletionMessageParam
 from .gods.base import GodProfile, GodResponse
+from .decrees.decree import PeerCritique
 from .document_rag import DocumentRAGStore
 from .gods.registry import GOD_TIMEOUTS
 from .chunker import chunk_for_god, CHUNK_THRESHOLD
@@ -600,6 +601,13 @@ class Council:
             failed_names = [f"{r.god_name}({r.dissent})" for r in responses if r.dissent]
             voices += f"\n\n[NOTA: Los siguientes dioses no respondieron: {', '.join(failed_names)}]"
 
+        if peer_critiques:
+            review_block = "\n\n".join(
+                f"[REVISION {c.god_name.upper()}]: {c.content}"
+                for c in peer_critiques if c.content
+            )
+            voices += "\n\n--- REVISIONES DE PARES ---\n" + review_block
+
         synthesis_prompt = _build_synthesis_prompt(query, voices)
 
         synthesis_client = self._anthropic_client or self._client
@@ -727,6 +735,7 @@ class Council:
         responses: list[GodResponse],
         query: str,
         budget_tier: str = "standard",
+        peer_critiques: list | None = None,
     ) -> AsyncIterator[str]:
         """Yield de cada chunk de texto de la sintesis en streaming."""
         successful = [r for r in responses if r.content and not r.dissent]
@@ -771,6 +780,70 @@ class Council:
         except asyncio.TimeoutError:
             yield "\n\n[Sintesis: tiempo agotado. Decreto parcial emitido.]"
 
+
+
+    async def peer_review_stream(self, original_responses, original_query: str):
+        """Cada dios revisa anonimamente las voces del resto desde su dominio.
+        Yield PeerCritique en orden de llegada (paralelo).
+        """
+        anon_block = "\n\n".join(
+            f"--- Respuesta {i + 1} ---\n{r.content}"
+            for i, r in enumerate(original_responses)
+        )
+        review_context = (
+            f"Consulta original: {original_query}\n\n"
+            f"Respuestas anonimas ({len(original_responses)} voces):\n\n{anon_block}"
+        )
+        god_names = [r.god_name for r in original_responses]
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _review_one(god_name: str) -> None:
+            god = self.pantheon.get(god_name)
+            if not god:
+                await queue.put(None)
+                return
+            system_extra = (
+                "MODO: REVISION DE PARES.\n"
+                f"Tu perspectiva de revision: {god.role}\n"
+                "Emite exactamente 3-5 frases: "
+                "(1) que respuesta es la mas solida y por que, "
+                "(2) el fallo critico mas importante del conjunto, "
+                "(3) que perspectiva critica falta desde tu dominio.\n"
+                "PROHIBIDO: repetir el contenido de las respuestas. Solo analisis critico directo."
+            )
+            t0 = time.time()
+            try:
+                resp = await asyncio.wait_for(
+                    self.consult_god(
+                        god_name,
+                        query=f"Emite tu revision critica de estas {len(original_responses)} respuestas anonimas.",
+                        context=review_context,
+                        system_extra=system_extra,
+                        max_tokens=400,
+                    ),
+                    timeout=35.0,
+                )
+                await queue.put(PeerCritique(
+                    god_name=god_name,
+                    content=resp.content,
+                    tokens_used=resp.tokens_used,
+                    latency_ms=resp.latency_ms,
+                ))
+            except Exception as exc:
+                _logger.warning("[COUNCIL] peer_review %s failed: %s", god_name, exc)
+                await queue.put(PeerCritique(
+                    god_name=god_name,
+                    content="",
+                    tokens_used=0,
+                    latency_ms=round((time.time() - t0) * 1000, 1),
+                ))
+
+        tasks = [asyncio.create_task(_review_one(g)) for g in god_names]
+        for _ in range(len(god_names)):
+            item = await queue.get()
+            if item is not None:
+                yield item
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def circuit_state(self) -> dict:
         return self._circuit.status()

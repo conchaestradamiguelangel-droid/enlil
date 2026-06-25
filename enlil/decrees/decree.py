@@ -14,6 +14,14 @@ class GodVoice:
     dissent: Optional[str] = None
 
 
+
+@dataclass
+class PeerCritique:
+    god_name: str
+    content: str
+    tokens_used: int
+    latency_ms: float
+
 @dataclass
 class Decree:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -31,6 +39,7 @@ class Decree:
     predicted_scores: dict = field(default_factory=dict)
     # Firma post-cuántica ML-DSA-87 — irrevocable desde el origen
     pq_signature: Optional[str] = None
+    peer_review: list = field(default_factory=list)
 
     def has_dissent(self) -> bool:
         return any(v.dissent for v in self.voices)

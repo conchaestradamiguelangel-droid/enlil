@@ -8,11 +8,13 @@ def _headers(api_key: str) -> dict:
     return {"Content-Type": "application/json", "X-Api-Key": api_key}
 
 
-def query_stream(url: str, api_key: str, text: str, budget_tier=None):
+def query_stream(url: str, api_key: str, text: str, budget_tier=None, peer_review: bool = False):
     """POST /query/stream -- genera dicts de eventos SSE."""
     payload = {"query": text}
     if budget_tier:
         payload["budget_tier"] = budget_tier
+    if peer_review:
+        payload["peer_review"] = True
     req = urllib.request.Request(
         f"{url}/query/stream",
         data=json.dumps(payload).encode(),
