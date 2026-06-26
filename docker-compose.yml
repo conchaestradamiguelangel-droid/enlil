@@ -1,6 +1,7 @@
 services:
   enlil:
     build: .
+    container_name: enlil
     env_file: .env
     ports:
       - "8002:8002"
@@ -8,12 +9,28 @@ services:
       - ./data:/app/data
     environment:
       - ENLIL_DB=/app/data/enlil.db
+      - ENLIL_PQ_KEYPATH=/app/data/enlil_pq.key
+      - QDRANT_URL=http://qdrant:6333
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   qdrant:
     image: qdrant/qdrant:latest
+    container_name: qdrant
     ports:
       - "6333:6333"
     volumes:
       - ./data/qdrant:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
