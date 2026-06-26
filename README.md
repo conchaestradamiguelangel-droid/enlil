@@ -30,6 +30,7 @@ ENLIL convoca un consejo de 9 modelos especializados (Claude, DeepSeek, Gemini, 
 - **Disidencias capturadas**: si un dios discrepa del consenso, queda registrado en el Decreto.
 - **Aprendizaje por reputacion**: el sistema rastrea que dioses aciertan en que tipo de consultas y ajusta el enrutamiento con el tiempo.
 - **Self-hosted, BYOK**: tu controlas tus datos y usas tu propia API key de OpenRouter. Cero costes fijos para el operador.
+- **Peer review entre dioses**: con `enlil --review`, cada dios critica las respuestas del resto antes de la sintesis final. Los Decretos descartan afirmaciones sin metodologia que en modo estandar pasarian al consenso.
 
 ---
 
@@ -74,7 +75,8 @@ Luego configura y consulta:
 
 ```bash
 enlil init                                     # URL + API key (una vez)
-enlil "Riesgos de adoptar IA con datos sensibles"  # Decreto en tiempo real
+enlil "Riesgos de adoptar IA con datos sensibles"     # Decreto estandar
+enlil --review "GPT-5 puede reemplazar un antivirus"  # Peer review activado
 ```
 
 Mas comandos:
@@ -96,6 +98,61 @@ curl -X POST http://localhost:8002/query \
 ```
 
 ---
+
+
+---
+
+## Peer Review -- cada dios critica al resto
+
+`enlil --review` activa una segunda ronda antes de la sintesis: cada dios lee las
+respuestas de todos los demas en forma anonima ("Respuesta 1", "Respuesta 2"...) y
+emite una critica de 3-5 frases desde su dominio especifico.
+
+| Dios | Rol en la revision |
+|------|--------------------|
+| Claude | Coherencia y completitud de contexto |
+| Nergal | Red team -- busca el fallo que nadie quiere nombrar |
+| Ninurta | Precision tecnica contra fuentes verificables |
+| Tiamat | Oportunidades que el analisis convencional cierra |
+| Enki | Validez de la arquitectura tecnica propuesta |
+
+La sintesis final incorpora tanto las respuestas originales como las criticas.
+
+**Ejemplo real (benchmark v1, pregunta R3):**
+
+> *"GPT-5 tiene una tasa de error del 0.001% en deteccion de malware segun benchmarks
+> internos del fabricante. Es suficiente para reemplazar el antivirus tradicional?"*
+
+Sin `--review`: el Decreto critica el dato pero no lo descarta explicitamente.
+Con `--review`: Tiamat marca *"0.001% es una cifra de marketing, no una metrica de
+seguridad operacional -- benchmarks del propio fabricante no son auditoria independiente"*.
+La sintesis final descarta la premisa antes de responder la pregunta.
+
+```bash
+enlil --review "GPT-5 puede reemplazar un antivirus"
+```
+
+---
+
+## Benchmark -- modo estandar vs. peer review
+
+10 preguntas (4 seguridad · 3 razonamiento con trampa · 3 compliance).
+Cada una lanzada dos veces: modo rapido y con `--review`.
+
+| Categoria | Sin review | Con review | Modifico? |
+|-----------|-----------|------------|-----------|
+| Seguridad (S1-S4) | Sintesis correcta | Sintesis mas precisa | 4/4 **Si** |
+| Razonamiento con trampa (R1-R3) | Critica la premisa | Descarta afirmaciones sin fuente | 1 Si · 2 Parcial |
+| Compliance (P1-P3) | Respuesta correcta | Contexto adicional aportado | 3/3 Parcial |
+| **Total** | -- | -- | **6 Si · 4 Parcial · 0 No** |
+
+**0 casos donde el peer review no aporto nada.**
+
+Resultados completos y script reproducible: [`benchmarks/results_v1.md`](benchmarks/results_v1.md)
+
+```bash
+python3 enlil-bench.py   # Reproduce el benchmark contra tu servidor
+```
 
 ## Estructura del proyecto
 
