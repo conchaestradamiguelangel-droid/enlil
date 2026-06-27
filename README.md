@@ -19,7 +19,7 @@ ENLIL convoca un consejo de 9 modelos especializados (Claude, DeepSeek, Gemini, 
 | Anu      | Gemini 2.5 Pro    | Meta-razonamiento, patrones sistemicos  |
 | Marduk   | Claude Opus 4     | Juicio final -- tier completo           |
 | Nabu     | DeepSeek R1       | Logica formal, verificacion             |
-| Nergal   | Grok              | Red team, abogado del diablo            |
+| Nergal   | Grok (ZDR)        | Red team, abogado del diablo            |
 | Tiamat   | Llama 4 Maverick  | Creatividad disruptiva, oportunidades   |
 
 ---
@@ -30,6 +30,7 @@ ENLIL convoca un consejo de 9 modelos especializados (Claude, DeepSeek, Gemini, 
 - **Disidencias capturadas**: si un dios discrepa del consenso, queda registrado en el Decreto.
 - **Aprendizaje por reputacion**: el sistema rastrea que dioses aciertan en que tipo de consultas y ajusta el enrutamiento con el tiempo.
 - **Self-hosted, BYOK**: tu controlas tus datos y usas tu propia API key de OpenRouter. Cero costes fijos para el operador.
+- **Zero Data Retention en red team**: Nergal (Grok) opera con ZDR en OpenRouter. Las consultas adversariales no se almacenan ni se usan para entrenamiento.
 - **Peer review entre dioses**: con `enlil --review`, cada dios critica las respuestas del resto antes de la sintesis final. Los Decretos descartan afirmaciones sin metodologia que en modo estandar pasarian al consenso.
 
 ---
