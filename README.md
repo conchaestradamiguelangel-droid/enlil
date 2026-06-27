@@ -12,15 +12,15 @@ ENLIL convoca un consejo de 9 modelos especializados (Claude, DeepSeek, Gemini, 
 
 | Dios     | Modelo            | Especialidad                            |
 |----------|-------------------|-----------------------------------------|
-| Claude   | Claude Sonnet 4.6 | Contexto, alineacion, coherencia        |
-| Enki     | DeepSeek v3       | Analisis tecnico, codigo, arquitectura  |
-| Ninurta  | Qwen 235B         | Auditoria, inspeccion adversarial       |
-| Inanna   | Mistral Large     | Comunicacion, decision, accion          |
-| Anu      | Gemini 2.5 Pro    | Meta-razonamiento, patrones sistemicos  |
-| Marduk   | Claude Opus 4     | Juicio final -- tier completo           |
-| Nabu     | DeepSeek R1       | Logica formal, verificacion             |
-| Nergal   | Grok (ZDR)        | Red team, abogado del diablo            |
-| Tiamat   | Llama 4 Maverick  | Creatividad disruptiva, oportunidades   |
+| Claude   | [Claude Sonnet 4.6](https://openrouter.ai/anthropic/claude-sonnet-4.6) | Contexto, alineacion, coherencia        |
+| Enki     | [DeepSeek v3](https://openrouter.ai/deepseek/deepseek-chat)       | Analisis tecnico, codigo, arquitectura  |
+| Ninurta  | [Qwen 235B](https://openrouter.ai/qwen/qwen3-235b-a22b)         | Auditoria, inspeccion adversarial       |
+| Inanna   | [Mistral Large](https://openrouter.ai/mistralai/mistral-large)     | Comunicacion, decision, accion          |
+| Anu      | [Gemini 2.5 Pro](https://openrouter.ai/google/gemini-2.5-pro)    | Meta-razonamiento, patrones sistemicos  |
+| Marduk   | [Claude Opus 4](https://openrouter.ai/anthropic/claude-opus-4)     | Juicio final -- tier completo           |
+| Nabu     | [DeepSeek R1](https://openrouter.ai/deepseek/deepseek-r1)       | Logica formal, verificacion             |
+| Nergal   | [Grok (ZDR)](https://openrouter.ai/x-ai/grok-4.20)        | Red team, abogado del diablo            |
+| Tiamat   | [Llama 4 Maverick](https://openrouter.ai/meta-llama/llama-4-maverick)  | Creatividad disruptiva, oportunidades   |
 
 ---
 
