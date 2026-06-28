@@ -35,6 +35,22 @@ ENLIL convoca un consejo de 9 modelos especializados (Claude, DeepSeek, Gemini, 
 
 ---
 
+## Por que no simplemente llamar a multiples modelos
+
+La diferencia entre *agregar respuestas* y *deliberar en consejo*:
+
+| | Un modelo | N modelos en paralelo | ENLIL |
+|--|--|--|--|
+| Perspectivas especializadas por dominio | No | Parcial | 9 dominios, contratos fijos |
+| Revision cruzada entre modelos | No | No | Si (`enlil --review`) |
+| Disidencias capturadas en el veredicto | No | No | Si |
+| Firma post-cuantica auditable | No | No | ML-DSA-87 (NIST FIPS 204) |
+| Self-hosted, sin vendor lock-in | Parcial | Parcial | BYOK total |
+
+karpathy encuadro los *LLM councils* como paradigma. ENLIL anade la pieza que falta: revision de pares estructurada por dominio propio. Nergal hace red team adversarial. Ninurta audita precision tecnica contra fuentes verificables. Tiamat busca el supuesto que nadie cuestiono.
+
+---
+
 ## Requisitos
 
 - Docker y Docker Compose
@@ -78,6 +94,24 @@ Luego configura y consulta:
 enlil init                                     # URL + API key (una vez)
 enlil "Riesgos de adoptar IA con datos sensibles"     # Decreto estandar
 enlil --review "GPT-5 puede reemplazar un antivirus"  # Peer review activado
+```
+
+**Ejemplo de salida:**
+
+```
+$ enlil "ML-DSA-87 o CRYSTALS-Kyber para firma de logs en un SIEM?"
+
+Convocando al Consejo...  (7 dioses, standard)
+  Claude    Enki    Ninurta    Tiamat    Nergal    Nabu    Anu
+
+DECRETO  |  decree_id: d8a3f1c9  |  ML-DSA-87
+-------------------------------------------------------------
+VEREDICTO
+La pregunta esta mal formulada: CRYSTALS-Kyber es un KEM (encapsulacion
+de clave), no un algoritmo de firma. Para logs en SIEM: ML-DSA-87.
+Kyber no aplica. 7/7 dioses concuerdan.
+
+DISIDENCIAS: ninguna.
 ```
 
 Mas comandos:
