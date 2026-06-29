@@ -16,6 +16,7 @@ import argparse
 import sys
 
 from enlil.cli import config, client, render
+from enlil.gods.registry import build_default_pantheon
 
 
 def cmd_init(_args):
@@ -121,9 +122,26 @@ def cmd_status(args):
         sys.exit(1)
 
 
+def cmd_gods(_args):
+    pantheon = build_default_pantheon()
+
+    print()
+    print(f"{'God':<10} {'Model':<40} Domain")
+    print("-" * 90)
+
+    for god in pantheon.values():
+        domain = ", ".join(god.domains[:3])
+        print(
+            f"{god.name:<10} "
+            f"{god.model:<40} "
+            f"{domain}"
+        )
+
+    print()
+
 def main():
     # Atajo: si el primer arg no es un subcomando conocido, es una consulta directa
-    _known = {"init", "query", "history", "decree", "status", "-h", "--help", "--version"}
+    _known = {"init", "query", "history", "decree", "status", "gods", "-h", "--help", "--version"}
     argv = sys.argv[1:]
     if argv and argv[0] not in _known:
         argv = ["query"] + argv
@@ -154,6 +172,11 @@ def main():
     p_d.add_argument("id", help="ID del decreto")
 
     sub.add_parser("status", help="Estado del servidor y panteon activo")
+    
+    sub.add_parser(
+    "gods",
+    help="List available gods and their models"
+    )
 
     args = parser.parse_args(argv)
 
@@ -163,6 +186,7 @@ def main():
         "history": cmd_history,
         "decree":  cmd_decree,
         "status":  cmd_status,
+        "gods":    cmd_gods,
     }
     fn = dispatch.get(args.cmd)
     if fn:
