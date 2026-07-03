@@ -7,7 +7,7 @@ from .base import GodProfile
 
 PROFILE = GodProfile(
     name="Claude",
-    model="anthropic/claude-sonnet-4-6",
+    model="anthropic/claude-sonnet-5",
     role="Dios de Contexto -- alineacion y coherencia con la realidad del usuario",
     domains=["context", "alignment", "strategy", "communication", "review"],
     voice_signature=(

@@ -1070,12 +1070,12 @@ def _dashboard_html() -> str:
 
 <script>
 const GOD_META = {
-  'claude':  { symbol: '⚡', color: '#e6c97a', rgb: '230,201,122', role: 'Estrategia y Contexto',      model: 'claude-sonnet-4-6' },
+  'claude':  { symbol: '⚡', color: '#e6c97a', rgb: '230,201,122', role: 'Estrategia y Contexto',      model: 'claude-sonnet-5' },
   'enki':    { symbol: '🌊', color: '#4fc3f7', rgb: '79,195,247',  role: 'Análisis Técnico',            model: 'deepseek-v4-pro' },
   'ninurta': { symbol: '🔥', color: '#ef5350', rgb: '239,83,80',   role: 'Seguridad y Defensa',         model: 'nemotron-253b' },
   'inanna':  { symbol: '🌙', color: '#ce93d8', rgb: '206,147,216', role: 'Comunicación y Ventas',       model: 'mistral-large-2512' },
   'anu':     { symbol: '✨', color: '#26c6da', rgb: '38,198,218',  role: 'Meta y Orquestación',         model: 'gemini-3.1-pro' },
-  'marduk':  { symbol: '⚖️', color: '#ff8f00', rgb: '255,143,0',   role: 'Juicio Supremo (solo Full)',  model: 'claude-opus-4-7' },
+  'marduk':  { symbol: '⚖️', color: '#ff8f00', rgb: '255,143,0',   role: 'Juicio Supremo (solo Full)',  model: 'claude-opus-4-8' },
   'nabu':    { symbol: '📿', color: '#26a69a', rgb: '38,166,154',  role: 'Razonamiento y Lógica',       model: 'deepseek-r1' },
   'nergal':  { symbol: '⚔️', color: '#d32f2f', rgb: '211,47,47',   role: 'Red Team Adversarial',        model: 'grok-4.3' },
   'tiamat':  { symbol: '🌀', color: '#9c27b0', rgb: '156,39,176',  role: 'Creatividad y Multimodal',    model: 'llama-4-maverick' },

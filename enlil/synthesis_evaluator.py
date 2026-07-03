@@ -33,7 +33,7 @@ class SynthesisEvaluator:
         Si falla: {"score": None, "reasoning": "evaluation_failed", "useful": None}"""
         try:
             client = self.council._anthropic_client or self.council._client
-            model = "claude-sonnet-4-6" if self.council._anthropic_client else self.council._resolve_model("anthropic/claude-sonnet-4-6")
+            model = "claude-sonnet-5" if self.council._anthropic_client else self.council._resolve_model("anthropic/claude-sonnet-5")
             prompt = self._PROMPT_TEMPLATE.format(
                 query=decree.query,
                 synthesis=decree.synthesis,

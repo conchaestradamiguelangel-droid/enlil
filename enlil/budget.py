@@ -3,7 +3,8 @@ from dataclasses import dataclass
 # Coste aproximado por 1K tokens en USD (OpenRouter, mayo 2026)
 MODEL_COSTS: dict[str, float] = {
     "anthropic/claude-sonnet-4-6":                 0.003,
-    "anthropic/claude-opus-4-7":                   0.015,
+    "anthropic/claude-sonnet-5":                   0.003,
+    "anthropic/claude-opus-4-8":                   0.015,
     "deepseek/deepseek-v4-pro":                    0.0007,
     "deepseek/deepseek-r1":                        0.00055,
     "nvidia/llama-3.1-nemotron-ultra-253b-v1":     0.002,

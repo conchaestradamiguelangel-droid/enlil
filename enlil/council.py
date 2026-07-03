@@ -104,6 +104,7 @@ def _store_perspective(decree_id: str, god_name: str, query_type: str, perspecti
 
 _ANTHROPIC_MODEL_MAP = {
     "anthropic/claude-sonnet-4-6":                  "claude-sonnet-4-6",
+    "anthropic/claude-sonnet-5":                    "claude-sonnet-5",
     "anthropic/claude-opus-4-8":                    "claude-opus-4-8",
     "anthropic/claude-sonnet-4-5":                  "claude-sonnet-4-6",
     "openai/gpt-4o":                                "claude-sonnet-4-6",
@@ -304,7 +305,7 @@ class Council:
 
     def _resolve_model(self, model: str) -> str:
         if self.mode == "anthropic":
-            return _ANTHROPIC_MODEL_MAP.get(model, "claude-sonnet-4-6")
+            return _ANTHROPIC_MODEL_MAP.get(model, "claude-sonnet-5")
         return model
 
     async def _lector_digest(self, text: str, query: str) -> str:
@@ -412,7 +413,7 @@ class Council:
         # Circuit breaker — respuesta inmediata si OpenRouter está degradado
         if self.mode == "openrouter" and self._circuit.is_open():
             if self._anthropic_client:
-                fallback_model = _ANTHROPIC_MODEL_MAP.get(god.model, "claude-sonnet-4-6")
+                fallback_model = _ANTHROPIC_MODEL_MAP.get(god.model, "claude-sonnet-5")
                 try:
                     t0 = time.monotonic()
                     resp = await asyncio.wait_for(
@@ -585,6 +586,7 @@ class Council:
         query: str,
         budget_tier: str = "standard",
         system_extra: str = "",
+        peer_critiques: list | None = None,
     ) -> str:
         successful = [r for r in responses if r.content and not r.dissent]
         if not successful:
@@ -617,7 +619,7 @@ class Council:
         synthesis_model = (
             "claude-opus-4-8"
             if use_opus
-            else self._resolve_model("anthropic/claude-sonnet-4-6")
+            else self._resolve_model("anthropic/claude-sonnet-5")
         )
         if self._synthesis_circuit.is_open():
             return (
@@ -759,7 +761,7 @@ class Council:
         use_opus = self._anthropic_client is not None
         synthesis_model = (
             "claude-opus-4-8" if use_opus
-            else self._resolve_model("anthropic/claude-sonnet-4-6")
+            else self._resolve_model("anthropic/claude-sonnet-5")
         )
 
         stream = await synthesis_client.chat.completions.create(
