@@ -515,9 +515,10 @@ class Council:
     async def _consult_god_safe(
         self, name: str, query: str, context: str, system_extra: str = "",
         max_tokens: int = 1024, doc_id: Optional[str] = None, original_context: str = "",
+        timeout_override: float | None = None,
     ) -> GodResponse:
         try:
-            god_timeout = GOD_TIMEOUTS.get(name, 45.0)
+            god_timeout = timeout_override if timeout_override is not None else GOD_TIMEOUTS.get(name, 45.0)
             return await self.consult_god(
                 name, query, context,
                 system_extra=system_extra,
@@ -529,7 +530,7 @@ class Council:
         except asyncio.TimeoutError:
             god = self.pantheon[name]
             model = self._resolve_model(god.model)
-            god_timeout = GOD_TIMEOUTS.get(name, 45.0)
+            god_timeout = timeout_override if timeout_override is not None else GOD_TIMEOUTS.get(name, 45.0)
             return GodResponse(
                 god_name=name,
                 model=model,
@@ -693,6 +694,7 @@ class Council:
         god_overrides: Optional[dict] = None,
         max_tokens: int = 2048,
         doc_id: Optional[str] = None,
+        timeout_override: float | None = None,
     ) -> AsyncIterator[GodResponse]:
         """Yield de cada GodResponse cuando termina, en orden de llegada."""
         overrides = god_overrides or {}
@@ -718,6 +720,7 @@ class Council:
                 name, query, god_context,
                 system_extra=extra, max_tokens=max_tokens, doc_id=doc_id,
                 original_context=original_context,
+                timeout_override=timeout_override,
             )
             await result_queue.put(resp)
 
@@ -726,6 +729,8 @@ class Council:
         total = len(valid_names)
         from .gods.registry import GOD_TIMEOUTS
         max_god_timeout = max((GOD_TIMEOUTS.get(n, 60.0) for n in valid_names), default=90.0)
+        if timeout_override is not None:
+            max_god_timeout = timeout_override
         _start = asyncio.get_event_loop().time()
         deadline = _start + max_god_timeout + 30.0
         while received < total:

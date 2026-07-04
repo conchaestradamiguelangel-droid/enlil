@@ -52,7 +52,8 @@ def cmd_query(args):
     in_synthesis = False
     try:
         peer_review = getattr(args, "review", False)
-        for event in client.query_stream(cfg["url"], cfg["api_key"], text, getattr(args, "tier", None), peer_review=peer_review):
+        timeout_override = getattr(args, "timeout", None)
+        for event in client.query_stream(cfg["url"], cfg["api_key"], text, getattr(args, "tier", None), peer_review=peer_review, timeout_override=timeout_override):
             etype = event.get("type")
             if etype == "init":
                 render.council_init(event["gods"], event["domains"], event["budget_tier"])
@@ -163,6 +164,8 @@ def main():
                      help="Tier de presupuesto (tokens)")
     p_q.add_argument("--review", action="store_true", default=False,
                      help="Activar revision de pares: cada dios critica las voces del resto")
+    p_q.add_argument("--timeout", type=float, default=None, metavar="SECS",
+                     help="Timeout por dios en segundos (sobreescribe defaults, ej: --timeout 30)")
 
     p_h = sub.add_parser("history", help="Ultimos decretos")
     p_h.add_argument("-n", type=int, default=10, metavar="N",

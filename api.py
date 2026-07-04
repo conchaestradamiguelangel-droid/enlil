@@ -72,6 +72,7 @@ class QueryRequest(BaseModel):
     voices_count: int | None = None
     parent_decree_id: str | None = None
     peer_review: bool = False
+    timeout_override: float | None = None
 
 
 class FeedbackRequest(BaseModel):
@@ -244,7 +245,7 @@ async def run_query_stream(req: QueryRequest, client: dict = Depends(require_aut
         _max_tok_god = 3000 if budget.tier == "full" else 2048
         async for god_resp in orch.council.convene_stream(
             god_names, text, context, god_overrides=god_overrides,
-            max_tokens=_max_tok_god,
+            max_tokens=_max_tok_god, timeout_override=req.timeout_override,
         ):
             responses.append(god_resp)
             event = {

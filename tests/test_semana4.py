@@ -313,7 +313,7 @@ class TestOpenRouterMode:
     def test_registry_uses_correct_claude_model(self):
         from enlil.gods.registry import build_default_pantheon
         pantheon = build_default_pantheon()
-        assert pantheon["claude"].model == "anthropic/claude-sonnet-4-6"
+        assert pantheon["claude"].model == "anthropic/claude-sonnet-5"
 
 
 class TestQdrantMemoryStore:
