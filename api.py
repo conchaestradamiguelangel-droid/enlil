@@ -11,6 +11,25 @@ from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
 load_dotenv()
+import time as _time
+from collections import defaultdict as _defaultdict
+
+_rate_buckets: dict = _defaultdict(list)
+_RATE_LIMIT = 10
+_RATE_WINDOW = 60.0
+
+
+def _rate_check(client_id: str) -> None:
+    now = _time.monotonic()
+    bucket = _rate_buckets[client_id]
+    _rate_buckets[client_id] = [t for t in bucket if now - t < _RATE_WINDOW]
+    if len(_rate_buckets[client_id]) >= _RATE_LIMIT:
+        raise HTTPException(429, detail="Rate limit exceeded: max 10 requests per minute")
+    _rate_buckets[client_id].append(now)
+
+
+def _sse_safe(ev: str) -> str:
+    return ev.replace(chr(13)+chr(10), " ").replace(chr(13), " ").replace(chr(10), " ")
 
 from enlil import Orchestrator
 from enlil.auth import require_auth, log_usage, init_auth_tables, require_master, create_client, list_clients, toggle_client, list_keys, revoke_key, add_key, all_clients_usage, client_usage_log
@@ -148,6 +167,7 @@ def _build_task_text(task_input: str, reason: str) -> str:
 
 @app.post("/query")
 async def run_query(req: QueryRequest, client: dict = Depends(require_auth)):
+    _rate_check(client["id"])
     decree = await _get_enlil().query(
         req.query, req.context, req.budget_tier, req.parent_decree_id,
         client_id=client["id"],
@@ -180,6 +200,7 @@ async def run_query(req: QueryRequest, client: dict = Depends(require_auth)):
 
 @app.post("/query/stream")
 async def run_query_stream(req: QueryRequest, client: dict = Depends(require_auth)):
+    _rate_check(client["id"])
     import json as _json
     orch = _get_enlil()
 
