@@ -15,6 +15,8 @@ ENLIL convenes a council of 9 specialized AI models — Claude, DeepSeek, Gemini
 
 ---
 
+![ENLIL dashboard](https://raw.githubusercontent.com/conchaestradamiguelangel-droid/enlil/main/docs/screenshot.png)
+
 ## The Council
 
 | God      | Model             | Domain                                   |
