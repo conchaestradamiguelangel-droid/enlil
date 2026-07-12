@@ -237,6 +237,14 @@ valid = verify_decree(
 
 ---
 
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to submit improvements, report bugs, or add support for new LLM providers.
+
+## Changelog
+
+Full history of changes is in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 GPL v3. Anyone who modifies and distributes ENLIL must publish the source code.
