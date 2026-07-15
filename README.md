@@ -63,6 +63,22 @@ Most "multi-model" setups aggregate responses. ENLIL **deliberates**.
 
 ---
 
+## Compliance & the EU AI Act
+
+ENLIL was not built as a compliance product, but a signed, auditable Decree happens to produce exactly the kind of evidence the EU AI Act asks for around high-risk AI decisions:
+
+| AI Act requirement | What a Decree provides |
+|---|---|
+| Art. 12 — record-keeping / logging | Every Decree is a timestamped, immutable record of the query, each god's reasoning, and the final synthesis. |
+| Art. 14 — human oversight | Dissents and confidence gaps are surfaced explicitly, not hidden behind a single averaged answer, so a human reviewer sees where the models disagreed. |
+| Annex IV — technical documentation | The Decree's structured output (per-model reasoning + signature) can serve as supporting evidence in a technical file. |
+
+None of this is a substitute for a legal compliance review, and ENLIL is not ISO 42001 or NIST AI RMF certified — those are project-level decisions still pending. What it does offer, and what most compliance tooling in this space doesn't, is the **cryptographic** side: the ML-DSA-87 (NIST FIPS 204) signature makes each Decree tamper-evident after the fact, which vendor SaaS logs generally aren't.
+
+**Cost model vs. the compliance-tooling market**: enterprise EU AI Act governance platforms (Credo AI, OneTrust, Holistic AI-style tools) are typically €30k–€300k+/year, sold through a consultative process. ENLIL is self-hosted, BYOK (bring your own OpenRouter key), GPL v3 — zero license cost, you only pay your own model usage. A handful of newer entrants (Prediction Guard's sovereign control plane, Legalithm's free-for-startups tier) share the self-hosted angle, but none combine it with a post-quantum-signed audit trail.
+
+---
+
 ## Requirements
 
 - Docker and Docker Compose
