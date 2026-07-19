@@ -6,6 +6,7 @@
 [![CI](https://github.com/conchaestradamiguelangel-droid/enlil/actions/workflows/enlil_tests.yml/badge.svg)](https://github.com/conchaestradamiguelangel-droid/enlil/actions/workflows/enlil_tests.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Live](https://img.shields.io/badge/live-enlil--council.com-green.svg)](https://enlil-council.com/dashboard)
+[![Hacker News](https://img.shields.io/badge/Hacker%20News-Show%20HN-orange)](https://news.ycombinator.com/item?id=48963795)
 
 **Live dashboard (real decrees in production):** https://enlil-council.com/dashboard
 
