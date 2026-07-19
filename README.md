@@ -7,6 +7,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Live](https://img.shields.io/badge/live-enlil--council.com-green.svg)](https://enlil-council.com/dashboard)
 [![Hacker News](https://img.shields.io/badge/Hacker%20News-Show%20HN-orange)](https://news.ycombinator.com/item?id=48963795)
+[![Dev.to](https://img.shields.io/badge/Dev.to-Technical%20Article-0A0A0A)](https://dev.to/conchaestradamiguelangeldroid/why-we-run-9-llms-in-parallel-instead-of-one-and-sign-every-output-with-post-quantum-crypto-5620)
 
 **Live dashboard (real decrees in production):** https://enlil-council.com/dashboard
 
@@ -255,6 +256,10 @@ valid = verify_decree(
 ```
 
 ---
+
+## Technical Writing
+
+- [Why We Run 9 LLMs in Parallel Instead of One (And Sign Every Output with Post-Quantum Crypto)](https://dev.to/conchaestradamiguelangeldroid/why-we-run-9-llms-in-parallel-instead-of-one-and-sign-every-output-with-post-quantum-crypto-5620) — Deep dive on the deliberation architecture, peer review mode, and ML-DSA-87 signing
 
 ## Contributing
 
