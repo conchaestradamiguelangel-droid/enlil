@@ -18,7 +18,7 @@ GOD_TIMEOUTS: dict[str, float] = {
     "enki":    200.0,
     "ninurta": 90.0,
     "inanna":  90.0,
-    "anu":     120.0,
+    "anu":     180.0,
     "marduk":  130.0,
     "nabu":    400.0,
     "nergal":  200.0,
