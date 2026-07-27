@@ -7,7 +7,7 @@ from .base import GodProfile
 
 PROFILE = GodProfile(
     name="Marduk",
-    model="anthropic/claude-opus-4-8",
+    model="anthropic/claude-opus-5",
     role="Dios Supremo -- juicio final, decisiones criticas e irreversibles",
     domains=["supreme", "critical", "judgment", "irreversible", "final"],
     tier_required="full",

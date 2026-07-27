@@ -140,6 +140,9 @@ _ANTHROPIC_MODEL_MAP = {
     "x-ai/grok-4.20":                              "claude-sonnet-4-6",  # modelo obsoleto — fallback
     "nvidia/llama-3.1-nemotron-ultra-253b-v1":      "claude-sonnet-4-6",
     "meta-llama/llama-4-maverick":                  "claude-sonnet-4-6",
+    "anthropic/claude-opus-5":                      "claude-opus-5",
+    "x-ai/grok-4.5":                                "claude-sonnet-4-6",
+    "nvidia/nemotron-3-ultra-550b-a55b":            "claude-sonnet-4-6",
     "openai/gpt-oss-120b:free":                     "claude-sonnet-4-6",
     "nvidia/nemotron-3-super-120b-a12b:free":       "claude-sonnet-4-6",
     "openai/gpt-oss-20b:free":                      "claude-haiku-4-5-20251001",
@@ -435,6 +438,10 @@ class Council:
                 system += f"\n\nContexto relevante:\n{effective_ctx}"
 
         model = self._resolve_model(god.model)
+        if "deepseek" in god.model and max_tokens < 4096:
+            # DeepSeek V4-Pro consume tokens en razonamiento interno antes de responder;
+            # con el limite generico de 2048 el contenido visible llega truncado.
+            max_tokens = 4096
         messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": system},
             {"role": "user", "content": query},
@@ -590,10 +597,15 @@ class Council:
             if name in self.pantheon
         ]
         actual_tasks = [asyncio.create_task(coro) for coro in tasks]
-        done, pending = await asyncio.wait(actual_tasks, timeout=180.0)
+        valid_names = [n for n in god_names if n in self.pantheon]
+        # El limite global debe cubrir al dios mas lento configurado (p.ej. Nabu a 400s
+        # con modelos de razonamiento extendido) — un tope fijo mas corto los cancelaba
+        # aunque su propio GOD_TIMEOUTS individual no se hubiera agotado.
+        max_god_timeout = max((GOD_TIMEOUTS.get(n, 45.0) for n in valid_names), default=90.0)
+        convene_timeout = max_god_timeout + 30.0
+        done, pending = await asyncio.wait(actual_tasks, timeout=convene_timeout)
         for t in pending:
             t.cancel()
-        valid_names = [n for n in god_names if n in self.pantheon]
         results = []
         for i, t in enumerate(actual_tasks):
             if t in done:
@@ -604,9 +616,9 @@ class Council:
                 results.append(GodResponse(
                     god_name=name,
                     model=self._resolve_model(god.model),
-                    content="[TIMEOUT]: " + name + " no respondio en 30s",
+                    content=f"[TIMEOUT]: {name} no respondio en {convene_timeout:.0f}s",
                     tokens_used=0,
-                    latency_ms=30000.0,
+                    latency_ms=convene_timeout * 1000,
                     dissent="timeout",
                 ))
         return results
@@ -648,7 +660,7 @@ class Council:
         # Opus SIEMPRE — calidad del veredicto es el diferenciador, no el tier
         use_opus = self._anthropic_client is not None
         synthesis_model = (
-            "claude-opus-4-8"
+            "claude-opus-5"
             if use_opus
             else self._resolve_model("anthropic/claude-sonnet-5")
         )
@@ -795,7 +807,7 @@ class Council:
         # Opus SIEMPRE — calidad del veredicto es el diferenciador, no el tier
         use_opus = self._anthropic_client is not None
         synthesis_model = (
-            "claude-opus-4-8" if use_opus
+            "claude-opus-5" if use_opus
             else self._resolve_model("anthropic/claude-sonnet-5")
         )
 

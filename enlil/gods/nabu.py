@@ -7,7 +7,7 @@ from .base import GodProfile
 
 PROFILE = GodProfile(
     name="Nabu",
-    model="deepseek/deepseek-r1",
+    model="deepseek/deepseek-v4-pro",
     role="Dios de la Sabiduria -- verificacion logica, contradicciones y consistencia formal",
     domains=["logic", "math", "proof", "reasoning", "deduction", "inference"],
     voice_signature=(

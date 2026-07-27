@@ -12,6 +12,9 @@ MODEL_COSTS: dict[str, float] = {
     "google/gemini-3.1-pro-preview":               0.003,
     "x-ai/grok-4.3":                               0.003,
     "meta-llama/llama-4-maverick":                 0.0002,
+    "anthropic/claude-opus-5":                     0.015,
+    "x-ai/grok-4.5":                               0.004,
+    "nvidia/nemotron-3-ultra-550b-a55b":           0.00135,
 }
 
 TIER_LIMITS: dict[str, int] = {

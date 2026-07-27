@@ -7,7 +7,7 @@ from .base import GodProfile
 
 PROFILE = GodProfile(
     name="Ninurta",
-    model="qwen/qwen3-235b-a22b",
+    model="nvidia/nemotron-3-ultra-550b-a55b",
     role="Dios de la Guerra -- auditoria, inspeccion adversarial y analisis de riesgos",
     domains=["security", "threat", "vulnerability", "audit", "defense"],
     voice_signature=(

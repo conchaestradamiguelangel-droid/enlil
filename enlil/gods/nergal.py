@@ -7,7 +7,7 @@ from .base import GodProfile
 
 PROFILE = GodProfile(
     name="Nergal",
-    model="x-ai/grok-4.3",
+    model="x-ai/grok-4.5",
     role="Dios de la Destruccion -- abogado del diablo, red team estructural",
     domains=["attack", "exploit", "red-team", "adversarial", "penetration"],
     voice_signature=(
