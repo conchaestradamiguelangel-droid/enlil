@@ -1,0 +1,43 @@
+name: Usage feedback
+description: Tell us how you're using ENLIL — what worked, what didn't, what's missing
+labels: [feedback]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: What are you using the Council for?
+      description: What kind of decisions are you routing through ENLIL? Which gods/tier?
+      placeholder: e.g. security incident triage, 4-god tier (NINURTA+NERGAL+NABU+CLAUDE)
+    validations:
+      required: true
+  - type: textarea
+    id: worked
+    attributes:
+      label: What worked well?
+      placeholder: e.g. deliberation caught disagreement between models that a single LLM would have missed
+    validations:
+      required: false
+  - type: textarea
+    id: missing
+    attributes:
+      label: What was missing or confusing?
+      placeholder: e.g. no support for X model provider, docs unclear on setting up your own API key
+    validations:
+      required: false
+  - type: dropdown
+    id: production
+    attributes:
+      label: Would you run this in production, or recommend it to someone else?
+      options:
+        - "Yes — already running it in production"
+        - "Yes — would recommend, testing/staging only so far"
+        - "Not yet — needs more work first (explain below)"
+        - "No — doesn't fit our use case (explain below)"
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else you want us to know?
+      description: Numbers welcome — decrees issued, latency, cost per decree, anything real
+      required: false
