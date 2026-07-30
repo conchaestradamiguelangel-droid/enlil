@@ -4,23 +4,21 @@ This roadmap reflects the current direction of ENLIL. Priorities are set by prod
 
 ---
 
-## v1.1 — Security Hardening (Q3 2026)
+## v1.1 — Security Hardening (Q3 2026) — shipped
 
-Planned issues — all open for contributors:
-
-- [ ] BYOK key audit — ensure API key never appears in logs or error paths ([#11](../../issues/11))
-- [ ] Prompt injection defense — god agents must reject injected instructions ([#12](../../issues/12))
-- [ ] SSE stream sanitization — sanitize god responses before emitting as SSE events ([#13](../../issues/13))
-- [ ] Rate limiting on /council endpoint to protect user OpenRouter quotas ([#14](../../issues/14))
+- [x] BYOK key audit — ensure API key never appears in logs or error paths ([#11](../../issues/11))
+- [x] Prompt injection defense — god agents must reject injected instructions ([#12](../../issues/12))
+- [x] SSE stream sanitization — sanitize god responses before emitting as SSE events ([#13](../../issues/13))
+- [x] Rate limiting on /council endpoint to protect user OpenRouter quotas ([#14](../../issues/14))
 
 ---
 
 ## v1.2 — Developer Experience (Q3 2026)
 
-- [ ] Integration tests for `POST /council` with mocked OpenRouter ([#7](../../issues/7))
-- [ ] `--timeout` flag for per-god response timeout ([#8](../../issues/8))
+- [x] Integration tests for `POST /council` with mocked OpenRouter ([#7](../../issues/7))
+- [x] `--timeout` flag for per-god response timeout ([#8](../../issues/8))
 - [ ] Webhook support for async Decree delivery
-- [ ] Auto-generated OpenAPI documentation page
+- [ ] Auto-generated OpenAPI documentation page ([#19](../../issues/19)) — *good first issue*
 
 ---
 
@@ -29,7 +27,7 @@ Planned issues — all open for contributors:
 - [ ] Benchmark v2 with updated model versions
 - [ ] God reputation dashboard (which gods are right, on which query types)
 - [ ] Dynamic god selection based on detected query domain
-- [ ] Decree export to Markdown and JSON
+- [ ] Decree export to Markdown and JSON ([#18](../../issues/18)) — *good first issue*
 
 ---
 
