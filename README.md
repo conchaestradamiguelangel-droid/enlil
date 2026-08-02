@@ -255,6 +255,8 @@ valid = verify_decree(
 )
 ```
 
+Need this signing layer outside ENLIL? We extracted it into a standalone library, [pqsign](https://github.com/pqsign/pqsign) — key rotation, FastAPI/Flask integration included.
+
 ---
 
 ## Technical Writing
