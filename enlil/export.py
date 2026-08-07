@@ -477,3 +477,116 @@ def generate_pdf(decree: Decree) -> bytes:
 def generate_html(decree: Decree) -> str:
     """Return the raw HTML (useful for debugging or browser-print fallback)."""
     return _build_html(decree)
+
+
+def generate_markdown(decree: Decree) -> str:
+    """
+    Render decree as a standalone Markdown document — full deliberation
+    (query, per-god voices, synthesis) plus the post-quantum traceability
+    block (SHA-256 content hash + ML-DSA-87 signature preview).
+    """
+    ts = datetime.datetime.fromtimestamp(decree.timestamp, tz=datetime.timezone.utc)
+    timestamp_str = ts.strftime('%Y-%m-%d %H:%M:%S UTC')
+    content_hash = _content_hash(decree)
+    sig_display = (decree.pq_signature[:64] + '…') if decree.pq_signature else 'NO DISPONIBLE'
+    base_url = os.environ.get('ENLIL_BASE_URL', 'http://localhost:8002')
+
+    dissenters = decree.dissenting_gods()
+    n_convened = len(decree.voices)
+    n_dissent = len(dissenters)
+    if n_dissent == 0:
+        consensus_line = f'**Consenso:** Unanimidad — {n_convened}/{n_convened} dioses en acuerdo'
+    else:
+        consensus_line = (
+            f'**Consenso:** Disenso detectado — {n_convened - n_dissent}/{n_convened} en acuerdo '
+            f'· Disidentes: {", ".join(dissenters)}'
+        )
+
+    lines = [
+        f'# Decreto ENLIL — {decree.id[:8].upper()}',
+        '',
+        f'- **ID completo:** `{decree.id}`',
+        f'- **Emitido:** {timestamp_str}',
+        f'- **Tier:** {decree.budget_tier}',
+        f'- **Dioses convocados:** {", ".join(decree.gods_convened) or "—"}',
+        f'- **Tokens totales:** {decree.total_tokens:,}',
+        f'- {consensus_line}',
+        '',
+        '## Consulta al Consejo',
+        '',
+        decree.query or '_(sin consulta registrada)_',
+        '',
+        '## Deliberación — Voces del Panteón',
+        '',
+    ]
+
+    for v in decree.voices:
+        estado = f'⚠️ Disenso ({v.dissent})' if v.dissent else '✓ Conforme'
+        lines += [
+            f'### {v.god_name} — {v.model}',
+            '',
+            f'*{estado} · {v.tokens_used:,} tokens · {v.latency_ms:.0f} ms*',
+            '',
+            v.content or '_(sin contenido)_',
+            '',
+        ]
+
+    lines += [
+        '## Decreto — Síntesis del Consejo',
+        '',
+        decree.synthesis or '_(sin síntesis)_',
+        '',
+        '## Bloque de Trazabilidad Post-Cuántica',
+        '',
+        f'- **Identificador del decreto:** `{decree.id}`',
+        f'- **Hash SHA-256 del contenido:** `{content_hash}`',
+        '- **Algoritmo de firma:** ML-DSA-87 (NIST FIPS 204) — Criptografía Post-Cuántica',
+        f'- **Timestamp de deliberación:** {timestamp_str}',
+        f'- **Firma criptográfica:** `{sig_display}`',
+        '',
+        f'Verificable en `{base_url}/decree/{decree.id}/verify`.',
+        '',
+    ]
+
+    return '\n'.join(lines)
+
+
+def generate_json(decree: Decree) -> dict:
+    """
+    Render decree as a JSON-serializable dict — the full deliberation
+    record plus post-quantum traceability, suitable for API export or
+    archival (independent of the /decree/{id} read endpoint's shape).
+    """
+    return {
+        'id': decree.id,
+        'timestamp': decree.timestamp,
+        'timestamp_iso': datetime.datetime.fromtimestamp(
+            decree.timestamp, tz=datetime.timezone.utc
+        ).isoformat(),
+        'query': decree.query,
+        'domains': decree.domains,
+        'gods_convened': decree.gods_convened,
+        'budget_tier': decree.budget_tier,
+        'total_tokens': decree.total_tokens,
+        'has_dissent': decree.has_dissent(),
+        'dissenting_gods': decree.dissenting_gods(),
+        'parent_decree_id': decree.parent_decree_id,
+        'voices': [
+            {
+                'god': v.god_name,
+                'model': v.model,
+                'content': v.content,
+                'tokens_used': v.tokens_used,
+                'latency_ms': v.latency_ms,
+                'dissent': v.dissent,
+            }
+            for v in decree.voices
+        ],
+        'synthesis': decree.synthesis,
+        'traceability': {
+            'content_hash_sha256': _content_hash(decree),
+            'signature_algorithm': 'ML-DSA-87',
+            'pq_signature': decree.pq_signature,
+            'pq_signed': bool(decree.pq_signature),
+        },
+    }

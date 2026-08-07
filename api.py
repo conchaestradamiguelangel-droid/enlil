@@ -5,8 +5,8 @@ import os
 from contextlib import asynccontextmanager
 from uuid import UUID
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Header, Request, UploadFile
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Header, Query, Request, UploadFile
+from fastapi.responses import HTMLResponse, StreamingResponse, Response, JSONResponse
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
@@ -60,7 +60,16 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="ENLIL", lifespan=lifespan)
+app = FastAPI(
+    title="ENLIL",
+    description=(
+        "Consejo de los Dioses — orquestador multi-LLM post-cuántico. "
+        "Convoca un panteón de 9 modelos en paralelo, delibera, sintetiza un "
+        "Decreto y lo firma con ML-DSA-87 (NIST FIPS 204). "
+        "Interactive docs: /docs (Swagger) · /redoc (ReDoc)."
+    ),
+    lifespan=lifespan,
+)
 
 
 # --- Modelos ---
@@ -166,7 +175,15 @@ def _build_task_text(task_input: str, reason: str) -> str:
 
 # --- API ---
 
-@app.post("/query")
+@app.post(
+    "/query",
+    summary="Convocar al Consejo",
+    description=(
+        "Convoca a los dioses del panteón sobre la consulta dada, delibera en "
+        "paralelo, sintetiza un Decreto y lo firma con ML-DSA-87. Respuesta "
+        "no incremental — para streaming usar /query/stream."
+    ),
+)
 async def run_query(req: QueryRequest, client: dict = Depends(require_auth)):
     _rate_check(client["id"])
     decree = await _get_enlil().query(
@@ -199,7 +216,15 @@ async def run_query(req: QueryRequest, client: dict = Depends(require_auth)):
 
 
 
-@app.post("/query/stream")
+@app.post(
+    "/query/stream",
+    summary="Convocar al Consejo (streaming)",
+    description=(
+        "Igual que /query pero devuelve la deliberación incremental vía "
+        "Server-Sent Events: voz de cada dios según llega, seguida de la "
+        "síntesis final firmada."
+    ),
+)
 async def run_query_stream(req: QueryRequest, client: dict = Depends(require_auth)):
     _rate_check(client["id"])
     import json as _json
@@ -397,7 +422,11 @@ async def email_decree(decree_id: str, req: Request, client: dict = Depends(requ
 
     return {"ok": True, "to": to_email, "decree_id": decree_id}
 
-@app.get("/history")
+@app.get(
+    "/history",
+    summary="Historial de decretos",
+    description="Lista los últimos decretos emitidos para el cliente autenticado, más recientes primero.",
+)
 async def get_history(limit: int = 20, client: dict = Depends(require_auth)):
     decrees = _get_enlil().history(limit, client_id=client["id"])
     return [
@@ -415,7 +444,11 @@ async def get_history(limit: int = 20, client: dict = Depends(require_auth)):
     ]
 
 
-@app.get("/decree/{decree_id}")
+@app.get(
+    "/decree/{decree_id}",
+    summary="Leer un decreto",
+    description="Devuelve el decreto completo: consulta, voces de cada dios, síntesis y firma ML-DSA-87.",
+)
 async def get_decree(decree_id: str, client: dict = Depends(require_auth)):
     decree = _get_enlil().get_decree(decree_id)
     if not decree:
@@ -450,7 +483,11 @@ async def get_decree(decree_id: str, client: dict = Depends(require_auth)):
     }
 
 
-@app.get("/decree/{decree_id}/verify")
+@app.get(
+    "/decree/{decree_id}/verify",
+    summary="Verificar la firma post-cuántica de un decreto",
+    description="Comprueba la firma ML-DSA-87 del decreto contra la clave pública activa del servidor.",
+)
 async def verify_decree(decree_id: str):
     from enlil.quantum import public_key_b64, is_available
     result = _get_enlil().store.verify(decree_id)
@@ -459,7 +496,50 @@ async def verify_decree(decree_id: str):
     return result
 
 
-@app.get("/quantum")
+@app.get(
+    "/decree/{decree_id}/export",
+    summary="Exportar un decreto (Markdown o JSON)",
+    description=(
+        "Descarga el decreto completo — consulta, deliberación de cada dios, "
+        "síntesis y bloque de trazabilidad post-cuántica (hash SHA-256 + firma "
+        "ML-DSA-87) — como fichero Markdown o como JSON estructurado."
+    ),
+)
+async def export_decree(
+    decree_id: str,
+    format: str = Query("md", description="Formato de salida: 'md' (Markdown descargable) o 'json'."),
+    client: dict = Depends(require_auth),
+):
+    """Export a full decree (deliberation + synthesis + PQ traceability) as Markdown or JSON."""
+    from enlil.export import generate_markdown, generate_json
+
+    decree = _get_enlil().get_decree(decree_id)
+    if not decree:
+        raise HTTPException(404, "Decreto no encontrado")
+    if getattr(decree, "client_id", "default") not in (client["id"], "default"):
+        raise HTTPException(403, "Acceso denegado")
+
+    short_id = decree_id[:8]
+    fmt = (format or "md").lower()
+
+    if fmt == "json":
+        return JSONResponse(generate_json(decree))
+    elif fmt == "md":
+        body = generate_markdown(decree)
+        return Response(
+            content=body,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="decreto_{short_id}.md"'},
+        )
+    else:
+        raise HTTPException(400, "Formato no soportado — usa format=md o format=json")
+
+
+@app.get(
+    "/quantum",
+    summary="Estado de la criptografía post-cuántica",
+    description="Disponibilidad de ML-DSA-87, identificador de clave activa y clave pública en base64.",
+)
 async def quantum_status():
     from enlil.quantum import is_available, public_key_b64, key_id
     return {
@@ -472,7 +552,11 @@ async def quantum_status():
     }
 
 
-@app.get("/pantheon")
+@app.get(
+    "/pantheon",
+    summary="Estado del panteón",
+    description="Los 9 dioses configurados, su modelo asignado y su reputación acumulada.",
+)
 async def get_pantheon():
     orch = _get_enlil()
     reputation = orch.pantheon_status()

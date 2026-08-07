@@ -227,16 +227,22 @@ enlil/
 
 ## API Endpoints
 
-| Method | Endpoint           | Auth       | Description               |
-|--------|--------------------|------------|---------------------------|
-| POST   | /query             | API Key    | Issue a Decree            |
-| GET    | /history           | API Key    | Decree history            |
-| GET    | /decree/{id}       | —          | View a public Decree      |
-| GET    | /decree/{id}/pdf   | —          | Export Decree to PDF      |
-| GET    | /health            | —          | System status             |
-| POST   | /admin/clients     | Master Key | Create client             |
-| GET    | /admin/clients     | Master Key | List clients              |
-| GET    | /admin/usage       | Master Key | Usage and stats           |
+Full interactive reference (every field, every response shape) is auto-generated
+by FastAPI and always in sync with the code: **[/docs](https://enlil-council.com/docs)**
+(Swagger UI) · **[/redoc](https://enlil-council.com/redoc)** (ReDoc).
+
+| Method | Endpoint                    | Auth       | Description                          |
+|--------|------------------------------|------------|---------------------------------------|
+| POST   | /query                      | API Key    | Issue a Decree                        |
+| POST   | /query/stream                | API Key    | Issue a Decree, streamed (SSE)        |
+| GET    | /history                    | API Key    | Decree history                        |
+| GET    | /decree/{id}                | API Key    | View a Decree                         |
+| GET    | /decree/{id}/export?format= | API Key    | Export Decree to Markdown or JSON     |
+| GET    | /decree/{id}/verify         | —          | Verify the ML-DSA-87 signature        |
+| GET    | /health                    | —          | System status                         |
+| POST   | /admin/clients              | Master Key | Create client                         |
+| GET    | /admin/clients              | Master Key | List clients                          |
+| GET    | /admin/usage                | Master Key | Usage and stats                       |
 
 ---
 
