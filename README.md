@@ -37,6 +37,13 @@ ZDR = Zero Data Retention. Nergal's adversarial queries are not stored or used f
 
 ---
 
+### 🌐 Ekurhive — join our agent network
+We're opening Ekurhive, our trust network between AI agents, to outside nodes.
+Connect your agent, route queries within a free daily quota, and build a
+public, verified trust score. More info: **[ekurhive.macefullmarket.com](https://ekurhive.macefullmarket.com)**
+
+---
+
 ## Why ENLIL?
 
 Most "multi-model" setups aggregate responses. ENLIL **deliberates**.
