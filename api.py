@@ -190,6 +190,18 @@ async def run_query(req: QueryRequest, client: dict = Depends(require_auth)):
         req.query, req.context, req.budget_tier, req.parent_decree_id,
         client_id=client["id"],
     )
+    # El cap mensual (require_auth) lee de usage_log. Antes solo se
+    # rellenaba en /query/stream — /query nunca lo alimentaba y el
+    # freno mensual quedaba fantasma para cualquier cliente no-streaming
+    # (p.ej. aegis-internal). Ver memoria AEGIS 16/08/2026.
+    log_usage(
+        client_id=client["id"],
+        decree_id=decree.id,
+        tokens=decree.total_tokens,
+        budget_tier=decree.budget_tier,
+        gods_count=len(decree.gods_convened),
+        query_preview=req.query,
+    )
     return {
         "decree_id": decree.id,
         "domains": decree.domains,
