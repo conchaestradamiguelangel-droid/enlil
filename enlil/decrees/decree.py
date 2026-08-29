@@ -40,6 +40,12 @@ class Decree:
     # Firma post-cuántica ML-DSA-87 — irrevocable desde el origen
     pq_signature: Optional[str] = None
     peer_review: list = field(default_factory=list)
+    # Propietario del decreto (client_id de la API key que lo generó).
+    # "default" cubre decretos históricos anteriores a esta columna.
+    # DecreeStore._row_to_decree() debe restaurar este valor al leer
+    # de SQLite — si no, el control de ownership de api.py trata
+    # cualquier decreto como "default" y no protege nada.
+    client_id: str = "default"
 
     def has_dissent(self) -> bool:
         return any(v.dissent for v in self.voices)

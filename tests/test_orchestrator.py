@@ -113,8 +113,9 @@ class TestOrchestratorIntegration:
              patch.object(orch.council, "synthesize", new=AsyncMock(return_value="Sintesis sobre firewall seguridad")):
             asyncio.run(orch.query("configurar firewall seguridad"))
 
-        # La memoria debe tener al menos 1 entrada
-        result = orch.memory.search("firewall")
+        # La memoria debe tener al menos 1 entrada (orch.query() sin
+        # client_id explícito usa "default")
+        result = orch.memory.search("firewall", client_id="default")
         assert isinstance(result, str)
 
     def test_voices_recorded_in_decree(self):

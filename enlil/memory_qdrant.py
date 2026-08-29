@@ -111,21 +111,38 @@ class QdrantMemoryStore:
                     id=point_id,
                     vector=vector,
                     payload={
-                        "decree_id": decree.id,
-                        "query":     decree.query[:500],
-                        "synthesis": decree.synthesis[:500],
-                        "domains":   decree.domains,
-                        "gods":      decree.gods_convened,
+                        "decree_id":  decree.id,
+                        "query":      decree.query[:500],
+                        "synthesis":  decree.synthesis[:500],
+                        "domains":    decree.domains,
+                        "gods":       decree.gods_convened,
+                        # Aislamiento por cliente (fix P0 2026-08-29). Puntos
+                        # antiguos sin este campo no llevan migración —
+                        # Qdrant no exige recrear entradas para añadir un
+                        # campo de payload nuevo, y un filtro por
+                        # client_id="X" simplemente no matchea puntos que
+                        # nunca tuvieron ese campo (quedan invisibles para
+                        # cualquier búsqueda normal, igual que "legacy").
+                        "client_id":  getattr(decree, "client_id", None) or "default",
                     },
                 )],
             )
         except Exception as e:
             logger.warning(f"[QDRANT] Error almacenando decreto: {e}")
 
-    def search(self, query: str, limit: int = 3) -> str:
-        if not self._available:
+    def search(self, query: str, limit: int = 3, client_id: Optional[str] = None) -> str:
+        """
+        Búsqueda semántica aislada por client_id.
+
+        Sin client_id (None/vacío) no se realiza ninguna búsqueda — se
+        devuelve "" directamente. Fallar cerrado (sin memoria) es
+        preferible a fallar abierto (memoria de otro cliente filtrada
+        por accidente si algún caller nuevo olvida pasar client_id).
+        """
+        if not self._available or not client_id:
             return ""
         try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
             vector = self._embed(query)
             if not vector:
                 return ""
@@ -134,6 +151,9 @@ class QdrantMemoryStore:
                 query=vector,
                 limit=limit,
                 score_threshold=0.6,
+                query_filter=Filter(
+                    must=[FieldCondition(key="client_id", match=MatchValue(value=client_id))]
+                ),
             ).points
             if not results:
                 return ""

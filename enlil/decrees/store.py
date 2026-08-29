@@ -57,6 +57,7 @@ class DecreeStore:
         ]
         pq_sig = sign_decree(decree.id, decree.query, decree.synthesis, decree.timestamp)
         decree.pq_signature = pq_sig or None
+        decree.client_id = client_id
         self._connection.execute(
             "INSERT INTO decrees VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (decree.id, decree.timestamp, decree.query,
@@ -106,6 +107,14 @@ class DecreeStore:
             voices=voices, synthesis=r["synthesis"], total_tokens=r["total_tokens"],
             budget_tier=r["budget_tier"], parent_decree_id=r["parent_decree_id"],
             pq_signature=r.get("pq_signature"),
+            # Restaurar el propietario real — sin esto, api.py trata
+            # cualquier decreto leído de SQLite como "default" y el
+            # control de ownership no bloquea nada (hallazgo P0
+            # 2026-08-29). Filas nulas/vacías (no deberían darse, la
+            # columna es NOT NULL DEFAULT 'default', pero por si acaso)
+            # caen también a "default", igual que los decretos
+            # históricos anteriores a esta columna.
+            client_id=r.get("client_id") or "default",
         )
         obj.vertical = r.get("vertical", "general")
         obj.predicted_scores = json.loads(r.get("predicted_scores", "{}") or "{}")

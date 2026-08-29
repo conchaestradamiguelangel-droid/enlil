@@ -98,6 +98,12 @@ class TestQueryEndpoint:
 class TestFeedbackEndpoint:
     def test_feedback_useful(self, client):
         c, mock_orch = client
+        # /feedback exige que el decreto exista Y que su client_id
+        # coincida EXACTAMENTE con el cliente autenticado (fix P0
+        # 2026-08-29, política de ownership exacto en la 2ª ronda —
+        # "default" ya no es un bypass válido, hay que igualar al
+        # cliente del fixture: "test-client").
+        mock_orch.get_decree.return_value = make_decree(client_id="test-client")
         resp = c.post("/feedback/decreto-123", json={"useful": True})
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
@@ -105,9 +111,35 @@ class TestFeedbackEndpoint:
 
     def test_feedback_not_useful(self, client):
         c, mock_orch = client
+        mock_orch.get_decree.return_value = make_decree(client_id="test-client")
         resp = c.post("/feedback/decreto-456", json={"useful": False})
         assert resp.status_code == 200
         mock_orch.feedback.assert_called_once_with("decreto-456", False)
+
+    def test_feedback_decreto_default_ya_no_es_accesible(self, client):
+        """Nuevo (2ª ronda P0, 2026-08-29): 'default' ya no es un bypass."""
+        c, mock_orch = client
+        mock_orch.get_decree.return_value = make_decree()  # client_id="default" por defecto
+        resp = c.post("/feedback/decreto-legacy", json={"useful": True})
+        assert resp.status_code == 403
+
+    def test_feedback_decreto_inexistente_da_404(self, client):
+        """Nuevo (fix P0 2026-08-29): sin decreto real, no se acepta feedback."""
+        c, mock_orch = client
+        mock_orch.get_decree.return_value = None
+        resp = c.post("/feedback/no-existe", json={"useful": True})
+        assert resp.status_code == 404
+
+    def test_feedback_sin_autenticacion_da_401(self, client):
+        """Nuevo (fix P0 2026-08-29): /feedback ya no acepta requests anónimas."""
+        from enlil.auth import require_auth
+        from api import app
+        app.dependency_overrides.pop(require_auth, None)  # quitar el override del fixture
+        c, mock_orch = client
+        resp = c.post("/feedback/decreto-789", json={"useful": True})
+        assert resp.status_code == 401
+        # restaurar el override para no afectar a otros tests del mismo fixture
+        app.dependency_overrides[require_auth] = lambda: {"id": "test-client", "active": True}
 
 
 class TestHistoryEndpoint:
@@ -142,7 +174,10 @@ class TestHistoryEndpoint:
 class TestDecreeEndpoint:
     def test_get_existing_decree(self, client):
         c, mock_orch = client
-        d = make_decree()
+        # Ownership exacto (fix P0 2ª ronda, 2026-08-29): el decreto debe
+        # pertenecer literalmente a "test-client" (el cliente del fixture),
+        # "default" ya no es un bypass válido.
+        d = make_decree(client_id="test-client")
         mock_orch.get_decree.return_value = d
         resp = c.get(f"/decree/{d.id}")
         assert resp.status_code == 200
@@ -156,9 +191,17 @@ class TestDecreeEndpoint:
         mock_orch.get_decree.return_value = None
         assert c.get("/decree/id-inexistente").status_code == 404
 
+    def test_get_decree_default_ya_no_es_accesible(self, client):
+        """Nuevo (2ª ronda P0, 2026-08-29): 'default' ya no es un bypass."""
+        c, mock_orch = client
+        d = make_decree()  # client_id="default" por defecto
+        mock_orch.get_decree.return_value = d
+        resp = c.get(f"/decree/{d.id}")
+        assert resp.status_code == 403
+
     def test_decree_includes_all_fields(self, client):
         c, mock_orch = client
-        d = make_decree()
+        d = make_decree(client_id="test-client")
         mock_orch.get_decree.return_value = d
         data = c.get(f"/decree/{d.id}").json()
         for field in ["id", "query", "synthesis", "domains", "gods_convened", "voices", "total_tokens", "budget_tier"]:

@@ -1,6 +1,8 @@
 import logging
+import re
 import sqlite3
 import os
+from typing import Optional
 from .decrees.decree import Decree
 
 DEFAULT_DB = os.environ.get("ENLIL_DB", "enlil.db")
@@ -13,6 +15,13 @@ class MemoryStore:
     Memoria de decretos pasados para enriquecer consultas futuras.
     Fase 1: SQLite FTS5 (búsqueda full-text eficiente, sin dependencias externas).
     Fase 2: Qdrant cuando haya volumen suficiente para embeddings.
+
+    Aislamiento por cliente (fix P0 2026-08-29): cada entrada queda
+    asociada al client_id que la generó. search() exige client_id y
+    solo devuelve memoria de ESE cliente exacto — nunca "default" ni de
+    otro cliente. Entradas legacy (anteriores a esta columna, o creadas
+    sin client_id) quedan con "default" y por tanto invisibles para
+    cualquier cliente normal, igual que los decretos legacy.
     """
 
     def __init__(self, db_path: str = DEFAULT_DB, connection: sqlite3.Connection | None = None):
@@ -38,12 +47,21 @@ class MemoryStore:
                 VALUES (new.rowid, new.decree_id, new.query, new.synthesis, new.domains);
             END;
         """)
+        if not self._column_exists("client_id"):
+            self._conn.execute(
+                "ALTER TABLE memory_entries ADD COLUMN client_id TEXT NOT NULL DEFAULT 'default'"
+            )
         self._conn.commit()
+
+    def _column_exists(self, column: str) -> bool:
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(memory_entries)").fetchall()]
+        return column in cols
 
     def store(self, decree: Decree):
         try:
             self._conn.execute(
-                "INSERT OR IGNORE INTO memory_entries VALUES (?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO memory_entries (decree_id, timestamp, query, synthesis, domains, gods, client_id) "
+                "VALUES (?,?,?,?,?,?,?)",
                 (
                     decree.id,
                     decree.timestamp,
@@ -51,25 +69,35 @@ class MemoryStore:
                     decree.synthesis,
                     " ".join(decree.domains),
                     " ".join(decree.gods_convened),
+                    getattr(decree, "client_id", None) or "default",
                 ),
             )
             self._conn.commit()
         except Exception as e:
             logger.debug("MemoryStore.store failed: %s", e)
 
-    def search(self, query: str, limit: int = 3) -> str:
-        """Búsqueda FTS5 en decretos anteriores."""
+    def search(self, query: str, limit: int = 3, client_id: Optional[str] = None) -> str:
+        """
+        Búsqueda FTS5 en decretos anteriores, aislada por client_id.
+
+        Sin client_id (None/vacío) no se realiza ninguna búsqueda — se
+        devuelve "" directamente. Fallar cerrado (sin memoria) es
+        preferible a fallar abierto (memoria de otro cliente filtrada
+        por accidente si algún caller nuevo olvida pasar client_id).
+        """
+        if not client_id:
+            return ""
         try:
             rows = self._conn.execute(
                 """
                 SELECT m.query, m.synthesis
                 FROM memory_fts f
                 JOIN memory_entries m ON f.decree_id = m.decree_id
-                WHERE memory_fts MATCH ?
+                WHERE memory_fts MATCH ? AND m.client_id = ?
                 ORDER BY rank
                 LIMIT ?
                 """,
-                (self._sanitize(query), limit),
+                (self._sanitize(query), client_id, limit),
             ).fetchall()
 
             if not rows:

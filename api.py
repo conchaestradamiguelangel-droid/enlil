@@ -53,6 +53,24 @@ def _get_enlil() -> Orchestrator:
     return enlil
 
 
+def _require_ownership(decree, client_id: str) -> None:
+    """
+    Ownership exacto para rutas de cliente normal (fix P0 2026-08-29,
+    2ª ronda). Antes se permitía también `client_id == "default"`, lo
+    que dejaba los 832 decretos históricos sin dueño real legibles,
+    exportables, reenviables por email y "feedback-eables" por
+    cualquier cliente autenticado que conociera el UUID. Política
+    nueva, sin excepciones: "default", None, vacío o cualquier valor
+    que no sea EXACTAMENTE el cliente autenticado → 403. Los decretos
+    legacy quedan inaccesibles por esta vía a propósito — un
+    administrador con acceso al servidor puede leerlos directamente
+    (DecreeStore.get()/consulta SQL), no hay ni se añade una ruta de
+    API para ello.
+    """
+    if getattr(decree, "client_id", None) != client_id:
+        raise HTTPException(403, "Acceso denegado")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global enlil
@@ -263,10 +281,13 @@ async def run_query_stream(req: QueryRequest, client: dict = Depends(require_aut
         budget = resolve_budget(text, _tier)
         god_names = select_gods(domains, orch.pantheon, budget.tier)
 
+        # Aislada por client_id (fix P0 2026-08-29, hallazgo propio no
+        # citado por Codex: /query/stream construye su Decree inline en
+        # vez de pasar por Orchestrator.query(), y tenía la misma fuga).
         if orch.qdrant.is_available:
-            mem = orch.qdrant.search(text, limit=3)
+            mem = orch.qdrant.search(text, limit=3, client_id=client["id"])
         else:
-            mem = orch.memory.search(text, limit=3)
+            mem = orch.memory.search(text, limit=3, client_id=client["id"])
         if mem:
             context = context + "\n\nDecretos anteriores relevantes:\n" + mem
 
@@ -363,7 +384,11 @@ async def run_query_stream(req: QueryRequest, client: dict = Depends(require_aut
     )
 
 @app.post("/feedback/{decree_id}")
-async def give_feedback(decree_id: str, req: FeedbackRequest):
+async def give_feedback(decree_id: str, req: FeedbackRequest, client: dict = Depends(require_auth)):
+    decree = _get_enlil().get_decree(decree_id)
+    if not decree:
+        raise HTTPException(404, "Decreto no encontrado")
+    _require_ownership(decree, client["id"])
     _get_enlil().feedback(decree_id, req.useful)
     return {"ok": True}
 
@@ -384,6 +409,7 @@ async def email_decree(decree_id: str, req: Request, client: dict = Depends(requ
     decree = _get_enlil().get_decree(decree_id)
     if not decree:
         raise HTTPException(404, "Decreto no encontrado")
+    _require_ownership(decree, client["id"])
 
     gmail_user = os.environ.get("GMAIL_USER", "")
     gmail_pass = os.environ.get("GMAIL_APP_PASSWORD", "")
@@ -465,8 +491,7 @@ async def get_decree(decree_id: str, client: dict = Depends(require_auth)):
     decree = _get_enlil().get_decree(decree_id)
     if not decree:
         raise HTTPException(404, "Decreto no encontrado")
-    if getattr(decree, "client_id", "default") not in (client["id"], "default"):
-        raise HTTPException(403, "Acceso denegado")
+    _require_ownership(decree, client["id"])
     return {
         "id": decree.id,
         "timestamp": decree.timestamp,
@@ -528,8 +553,7 @@ async def export_decree(
     decree = _get_enlil().get_decree(decree_id)
     if not decree:
         raise HTTPException(404, "Decreto no encontrado")
-    if getattr(decree, "client_id", "default") not in (client["id"], "default"):
-        raise HTTPException(403, "Acceso denegado")
+    _require_ownership(decree, client["id"])
 
     short_id = decree_id[:8]
     fmt = (format or "md").lower()
@@ -616,6 +640,7 @@ async def legal_analyze(payload: dict, client: dict = Depends(require_auth)):
         text=query,
         context=context,
         budget_tier="standard",
+        client_id=client["id"],
     )
     return {
         "decree_id": decree.id,
@@ -691,7 +716,7 @@ async def _extract_text(file: UploadFile) -> tuple[str, int]:
 
 
 @app.post("/doc/upload")
-async def doc_upload(file: UploadFile = File(...)):
+async def doc_upload(file: UploadFile = File(...), client: dict = Depends(require_auth)):
     """Extract text from document and return metadata. No AI call — instant response."""
     try:
         text, pages = await _extract_text(file)
@@ -726,7 +751,7 @@ async def analyze_doc(file: UploadFile = File(...), query: str = Form(""), clien
 
     effective_query = query.strip() or "Analiza este documento en profundidad y emite un Decreto con tus conclusiones."
 
-    decree = await _get_enlil().query(text=effective_query, context=text)
+    decree = await _get_enlil().query(text=effective_query, context=text, client_id=client["id"])
     return {
         "decree_id": decree.id,
         "domains": decree.domains,
@@ -835,6 +860,14 @@ async def require_ekurhive_task_auth(authorization: str | None = Header(default=
 
 @app.post("/task")
 async def ekurhive_task(req: EkurhiveTaskRequest, _=Depends(require_ekurhive_task_auth)):
+    # NOTA (revisión P0 client_id, 2026-08-29): este endpoint no pasa
+    # client_id a Orchestrator.query() a propósito — está protegido por
+    # require_ekurhive_task_auth (un secreto compartido único para el
+    # puente de agentes Ekurhive), no por require_auth con API key por
+    # cliente. No hay un client["id"] real que propagar aquí; el decreto
+    # queda con client_id="default" por diseño, no por descuido — no es
+    # el mismo modelo de confianza multi-tenant que /query, /legal/analyze
+    # o /analyze-doc.
     from enlil.quantum import sign_task_response as _sign
     ctx = req.context
     signal = _derive_context_signal(ctx)

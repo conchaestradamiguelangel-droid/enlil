@@ -75,11 +75,13 @@ class Orchestrator:
 
         god_names = select_gods(domains, self.pantheon, budget.tier)
 
-        # Búsqueda semántica (Qdrant) con fallback a FTS (SQLite)
+        # Búsqueda semántica (Qdrant) con fallback a FTS (SQLite) — aislada
+        # por client_id (fix P0 2026-08-29): nunca memoria de otro cliente
+        # ni memoria "default"/legacy para un cliente normal.
         if self.qdrant.is_available:
-            memory_context = self.qdrant.search(text, limit=3)
+            memory_context = self.qdrant.search(text, limit=3, client_id=client_id)
         else:
-            memory_context = self.memory.search(text, limit=3)
+            memory_context = self.memory.search(text, limit=3, client_id=client_id)
         if memory_context:
             context = context + "\n\nDecretos anteriores relevantes:\n" + memory_context
 
@@ -213,10 +215,11 @@ class Orchestrator:
 
         god_names = select_gods(domains, self.pantheon, budget.tier)
 
+        # Aislada por client_id (fix P0 2026-08-29) — mismo motivo que en query().
         if self.qdrant.is_available:
-            memory_context = self.qdrant.search(text, limit=3)
+            memory_context = self.qdrant.search(text, limit=3, client_id=client_id)
         else:
-            memory_context = self.memory.search(text, limit=3)
+            memory_context = self.memory.search(text, limit=3, client_id=client_id)
         if memory_context:
             context = context + "\n\nDecretos anteriores relevantes:\n" + memory_context
 
