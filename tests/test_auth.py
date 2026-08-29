@@ -154,3 +154,71 @@ class TestListadoAdminSinSecretos:
         k = list_keys(r["client_id"])[0]
         assert k["key_prefix"] == r["api_key"][:11]
         assert isinstance(k["key_id"], str) and len(k["key_id"]) > 0
+
+
+class TestForeignKeysPorConexion:
+    """
+    P0.2 (Codex, 2026-08-29): _db() no activaba PRAGMA foreign_keys=ON.
+    SQLite exige fijarlo en cada conexión -- no persiste en el fichero
+    ni se hereda de una conexión anterior.
+    """
+
+    def test_1_pragma_foreign_keys_activo_en_conexion_nueva(self):
+        conn = auth_module._db()
+        value = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        conn.close()
+        assert value == 1
+
+    def test_2_add_key_para_cliente_inexistente_falla(self):
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
+            add_key("cliente-que-no-existe-jamas", label="intento")
+
+    def test_3_no_queda_fila_huerfana_tras_el_fallo(self):
+        try:
+            add_key("cliente-que-no-existe-jamas-2", label="intento")
+        except sqlite3.IntegrityError:
+            pass
+        conn = sqlite3.connect(_TEST_DB)
+        n = conn.execute(
+            "SELECT COUNT(*) FROM api_keys WHERE client_id=?",
+            ("cliente-que-no-existe-jamas-2",),
+        ).fetchone()[0]
+        conn.close()
+        assert n == 0
+
+    def test_4_transaccion_limpia_no_dejo_conexion_a_medias(self):
+        """
+        Tras el fallo, una nueva operación normal debe funcionar sin
+        arrastrar ningún estado corrupto de la conexión anterior
+        (cada llamada abre y cierra su propia conexión).
+        """
+        try:
+            add_key("otro-cliente-inexistente", label="intento")
+        except sqlite3.IntegrityError:
+            pass
+        r = create_client(name="G", email=f"g-{uuid.uuid4().hex}@test.invalid")
+        assert _validate_key(r["api_key"]) is not None
+
+    def test_5_creacion_para_cliente_valido_sigue_funcionando(self):
+        r = create_client(name="H", email=f"h-{uuid.uuid4().hex}@test.invalid")
+        new_key = add_key(r["client_id"], label="segunda")
+        assert _validate_key(new_key) is not None
+        assert _validate_key(new_key)["id"] == r["client_id"]
+
+    def test_create_client_tambien_hace_rollback_limpio(self):
+        """
+        create_client() inserta en clients + api_keys en la misma
+        conexión -- si algo fallara a mitad, no debe quedar el cliente
+        sin su key ni al revés. Se fuerza un email duplicado (UNIQUE)
+        para disparar el fallo tras el primer INSERT.
+        """
+        email = f"dup-{uuid.uuid4().hex}@test.invalid"
+        create_client(name="Original", email=email)
+        with pytest.raises(sqlite3.IntegrityError):
+            create_client(name="Duplicado", email=email)
+        conn = sqlite3.connect(_TEST_DB)
+        n_clients = conn.execute(
+            "SELECT COUNT(*) FROM clients WHERE email=?", (email,)
+        ).fetchone()[0]
+        conn.close()
+        assert n_clients == 1  # el duplicado no dejó ni cliente ni key a medias

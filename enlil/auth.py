@@ -51,9 +51,18 @@ def generate_key_id() -> str:
 
 
 def _db():
+    """
+    SQLite exige activar foreign_keys en CADA conexión -- no persiste
+    en el fichero ni se hereda de una conexión anterior (fix P0.2,
+    hallazgo Codex 2026-08-29). Sin esto, las FK declaradas en el
+    esquema (client_id -> clients.id) nunca se aplican de verdad;
+    probablemente así llegaron a existir las filas huérfanas
+    encontradas en usage_log durante el ensayo de migración.
+    """
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -140,17 +149,22 @@ def create_client(name: str, email: str, plan: str = "standard",
     key = generate_api_key()
     now = time.time()
     conn = _db()
-    conn.execute(
-        "INSERT INTO clients (id,name,email,plan,monthly_token_budget,max_requests_per_hour,max_total_requests,monthly_decrees_limit,active,created_at,notes) "
-        "VALUES (?,?,?,?,?,?,?,?,1,?,?)",
-        (cid, name, email, plan, monthly_token_budget, max_requests_per_hour, max_total_requests, monthly_decrees_limit, now, notes)
-    )
-    conn.execute(
-        "INSERT INTO api_keys (key_id,key_hash,key_prefix,client_id,label,created_at,active) VALUES (?,?,?,?,?,?,1)",
-        (generate_key_id(), hash_api_key(key), key_prefix(key), cid, "primary", now)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "INSERT INTO clients (id,name,email,plan,monthly_token_budget,max_requests_per_hour,max_total_requests,monthly_decrees_limit,active,created_at,notes) "
+            "VALUES (?,?,?,?,?,?,?,?,1,?,?)",
+            (cid, name, email, plan, monthly_token_budget, max_requests_per_hour, max_total_requests, monthly_decrees_limit, now, notes)
+        )
+        conn.execute(
+            "INSERT INTO api_keys (key_id,key_hash,key_prefix,client_id,label,created_at,active) VALUES (?,?,?,?,?,?,1)",
+            (generate_key_id(), hash_api_key(key), key_prefix(key), cid, "primary", now)
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     # La clave completa se devuelve UNA sola vez aquí — nunca se
     # almacena en claro ni queda recuperable después de esta llamada.
     return {"client_id": cid, "api_key": key}
@@ -196,14 +210,23 @@ def revoke_key(key_id: str):
 
 
 def add_key(client_id: str, label: str = "extra") -> str:
+    """
+    Lanza sqlite3.IntegrityError si client_id no existe (FK, ver _db())
+    -- no queda ninguna fila huérfana, la transacción se deshace.
+    """
     key = generate_api_key()
     conn = _db()
-    conn.execute(
-        "INSERT INTO api_keys (key_id,key_hash,key_prefix,client_id,label,created_at,active) VALUES (?,?,?,?,?,?,1)",
-        (generate_key_id(), hash_api_key(key), key_prefix(key), client_id, label, time.time())
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "INSERT INTO api_keys (key_id,key_hash,key_prefix,client_id,label,created_at,active) VALUES (?,?,?,?,?,?,1)",
+            (generate_key_id(), hash_api_key(key), key_prefix(key), client_id, label, time.time())
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     # Igual que create_client(): se devuelve completa una sola vez.
     return key
 
