@@ -1225,9 +1225,9 @@ async function showDetail(clientId){
         <div>
           <div class="section-title" style="margin-bottom:0.6rem">API Keys</div>
           ${keys.map(k=>`<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
-            <code style="font-size:0.7rem;color:${k.active?'var(--green)':'var(--red)'};">${k.key.slice(0,24)}...</code>
+            <code style="font-size:0.7rem;color:${k.active?'var(--green)':'var(--red)'};">${k.key_prefix}...</code>
             <span style="font-size:0.62rem;color:var(--muted)">${k.label}</span>
-            ${k.active ? "<button class='btn-sm btn-danger' onclick=\"revokeKey('"+k.key+"')\">Revocar</button>" : "<span style='font-size:0.62rem;color:var(--red)'>Revocada</span>"}
+            ${k.active ? "<button class='btn-sm btn-danger' onclick=\"revokeKey('"+k.key_id+"')\">Revocar</button>" : "<span style='font-size:0.62rem;color:var(--red)'>Revocada</span>"}
           </div>`).join("")}
         </div>
         <div>
@@ -1254,9 +1254,9 @@ async function toggleClient(id, active){
   catch(e){ alert("Error: "+e.message); }
 }
 
-async function revokeKey(key){
+async function revokeKey(keyId){
   if (!confirm("¿Revocar esta key?")) return;
-  try { await api("/admin/keys/"+encodeURIComponent(key), "DELETE"); alert("Key revocada."); loadDashboard(); }
+  try { await api("/admin/keys/"+encodeURIComponent(keyId), "DELETE"); alert("Key revocada."); loadDashboard(); }
   catch(e){ alert("Error: "+e.message); }
 }
 
@@ -1311,6 +1311,7 @@ async function createClient(){
 
 @app.post("/admin/clients")
 async def admin_create_client(
+    response: Response,
     name: str,
     email: str,
     plan: str = "standard",
@@ -1321,6 +1322,9 @@ async def admin_create_client(
     notes: str = "",
     _=Depends(require_master),
 ):
+    # La respuesta contiene la clave completa (única vez) — nunca debe
+    # quedar cacheada en ningún punto intermedio (fix P0 2026-08-29).
+    response.headers["Cache-Control"] = "no-store"
     result = create_client(name, email, plan, monthly_token_budget,
                            max_requests_per_hour, max_total_requests,
                            monthly_decrees_limit, notes)
@@ -1344,14 +1348,15 @@ async def admin_list_keys(client_id: str, _=Depends(require_master)):
 
 
 @app.post("/admin/clients/{client_id}/keys")
-async def admin_add_key(client_id: str, label: str = "extra", _=Depends(require_master)):
+async def admin_add_key(client_id: str, response: Response, label: str = "extra", _=Depends(require_master)):
+    response.headers["Cache-Control"] = "no-store"
     key = add_key(client_id, label)
     return {"api_key": key}
 
 
-@app.delete("/admin/keys/{key}")
-async def admin_revoke_key(key: str, _=Depends(require_master)):
-    revoke_key(key)
+@app.delete("/admin/keys/{key_id}")
+async def admin_revoke_key(key_id: str, _=Depends(require_master)):
+    revoke_key(key_id)
     return {"ok": True}
 
 

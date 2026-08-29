@@ -1,7 +1,21 @@
 """
 ENLIL — Sistema de autenticación comercial
 API keys por cliente, rate limiting, logs de uso para facturación.
+
+Almacenamiento de API keys (Fase 2 P0, 2026-08-29): las claves nunca se
+guardan completas. Se derivan `key_hash` (SHA-256 con separador de
+dominio versionado, usado para autenticar) y `key_prefix` (solo para
+que un humano la reconozca en el dashboard). `key_id` es un
+identificador aleatorio NO derivado del secreto, usado por toda la
+administración (listar/revocar) — nunca la clave ni el hash.
+
+No se usa bcrypt/Argon2 ni pepper a propósito: estas claves ya tienen
+~256 bits de entropía real (secrets.token_urlsafe(32)), no son
+contraseñas humanas de baja entropía. Un KDF lento no añade seguridad
+aquí y rompe la búsqueda indexada; un pepper introduciría un secreto
+maestro cuya pérdida invalidaría las 13 claves existentes.
 """
+import hashlib
 import os
 import time
 import uuid
@@ -13,6 +27,27 @@ from fastapi import Header, HTTPException
 
 DB_PATH = os.environ.get("ENLIL_DB", "./data/enlil.db")
 MASTER_KEY = os.environ.get("ENLIL_MASTER_KEY", "")
+
+# Separador de dominio versionado — ver docstring del módulo. Cambiarlo
+# en el futuro (p.ej. "v2") exige un nuevo backfill completo con las
+# claves en claro, igual que rotar un pepper.
+_KEY_HASH_DOMAIN = "enlil-api-key-v1:"
+_KEY_PREFIX_LEN = 11
+
+
+def hash_api_key(raw_key: str) -> str:
+    """SHA-256(domain_separator || api_key), hex. Determinista e indexable."""
+    return hashlib.sha256((_KEY_HASH_DOMAIN + raw_key).encode("utf-8")).hexdigest()
+
+
+def key_prefix(raw_key: str) -> str:
+    """Solo para reconocimiento humano — nunca se usa para autenticar."""
+    return raw_key[:_KEY_PREFIX_LEN]
+
+
+def generate_key_id() -> str:
+    """Identificador NO secreto para administración — no se deriva del secreto."""
+    return secrets.token_hex(8)
 
 
 def _db():
@@ -40,7 +75,9 @@ def init_auth_tables():
         );
 
         CREATE TABLE IF NOT EXISTS api_keys (
-            key         TEXT PRIMARY KEY,
+            key_id      TEXT PRIMARY KEY,
+            key_hash    TEXT NOT NULL UNIQUE,
+            key_prefix  TEXT NOT NULL,
             client_id   TEXT NOT NULL,
             label       TEXT DEFAULT '',
             created_at  REAL NOT NULL,
@@ -109,11 +146,13 @@ def create_client(name: str, email: str, plan: str = "standard",
         (cid, name, email, plan, monthly_token_budget, max_requests_per_hour, max_total_requests, monthly_decrees_limit, now, notes)
     )
     conn.execute(
-        "INSERT INTO api_keys (key,client_id,label,created_at,active) VALUES (?,?,?,?,1)",
-        (key, cid, "primary", now)
+        "INSERT INTO api_keys (key_id,key_hash,key_prefix,client_id,label,created_at,active) VALUES (?,?,?,?,?,?,1)",
+        (generate_key_id(), hash_api_key(key), key_prefix(key), cid, "primary", now)
     )
     conn.commit()
     conn.close()
+    # La clave completa se devuelve UNA sola vez aquí — nunca se
+    # almacena en claro ni queda recuperable después de esta llamada.
     return {"client_id": cid, "api_key": key}
 
 
@@ -135,18 +174,23 @@ def toggle_client(client_id: str, active: bool):
 
 
 def list_keys(client_id: str) -> list:
+    """
+    Nunca devuelve `key` ni `key_hash` — solo el identificador no
+    secreto (`key_id`) y el prefijo de reconocimiento humano.
+    """
     conn = _db()
     rows = conn.execute(
-        "SELECT key,label,created_at,expires_at,active FROM api_keys WHERE client_id=?",
+        "SELECT key_id,key_prefix,label,created_at,expires_at,active FROM api_keys WHERE client_id=?",
         (client_id,)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def revoke_key(key: str):
+def revoke_key(key_id: str):
+    """Revoca por key_id — nunca por el valor de la clave."""
     conn = _db()
-    conn.execute("UPDATE api_keys SET active=0 WHERE key=?", (key,))
+    conn.execute("UPDATE api_keys SET active=0 WHERE key_id=?", (key_id,))
     conn.commit()
     conn.close()
 
@@ -155,11 +199,12 @@ def add_key(client_id: str, label: str = "extra") -> str:
     key = generate_api_key()
     conn = _db()
     conn.execute(
-        "INSERT INTO api_keys (key,client_id,label,created_at,active) VALUES (?,?,?,?,1)",
-        (key, client_id, label, time.time())
+        "INSERT INTO api_keys (key_id,key_hash,key_prefix,client_id,label,created_at,active) VALUES (?,?,?,?,?,?,1)",
+        (generate_key_id(), hash_api_key(key), key_prefix(key), client_id, label, time.time())
     )
     conn.commit()
     conn.close()
+    # Igual que create_client(): se devuelve completa una sola vez.
     return key
 
 
@@ -283,6 +328,11 @@ def client_usage_log(client_id: str, limit: int = 50) -> list:
 # ─── FastAPI dependencies ─────────────────────────────────────────────────────
 
 def _validate_key(key: str) -> Optional[dict]:
+    """
+    Autentica por key_hash — la clave en claro nunca se compara
+    directamente ni se guarda; solo se usa en el momento de la
+    petición para derivar el hash con el que se busca.
+    """
     conn = _db()
     row = conn.execute("""
         SELECT c.id, c.name, c.email, c.plan, c.monthly_token_budget,
@@ -290,8 +340,8 @@ def _validate_key(key: str) -> Optional[dict]:
                k.expires_at, k.active AS key_active
         FROM api_keys k
         JOIN clients c ON k.client_id = c.id
-        WHERE k.key=? AND k.active=1 AND c.active=1
-    """, (key,)).fetchone()
+        WHERE k.key_hash=? AND k.active=1 AND c.active=1
+    """, (hash_api_key(key),)).fetchone()
     conn.close()
     if not row:
         return None
