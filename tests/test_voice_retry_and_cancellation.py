@@ -25,6 +25,7 @@ def _resp(content, finish_reason="stop", total_tokens=100):
     resp.choices[0].message.content = content
     resp.choices[0].message.refusal = None
     resp.choices[0].message.tool_calls = None
+    resp.choices[0].message.function_call = None
     resp.choices[0].finish_reason = finish_reason
     resp.usage = MagicMock()
     resp.usage.total_tokens = total_tokens

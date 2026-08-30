@@ -282,18 +282,22 @@ def select_operative_synthesis(synthesis_attempts: list) -> SynthesisAttempt:
 def compute_decree_status(voice_states: list[str], synthesis_state: str) -> str:
     """Función única compartida por /query y /query/stream (V3 §8).
 
-    complete: todas las voces "complete" y síntesis "complete".
-    failed:   ninguna voz "complete" O síntesis no utilizable.
-    partial:  cualquier otra combinación con una síntesis utilizable.
+    Regla definitiva (corrección post-auditoría Codex sobre 6486a31 --
+    la versión anterior tenía una vía de escape que degradaba a "partial"
+    en vez de "failed" cuando NINGUNA voz llegó a "complete", con tal de
+    que alguna fuera "truncated"/"unknown". Eso era incorrecto: un
+    decreto sin ninguna voz completa nunca es "partial", sin importar que
+    la síntesis haya salido "complete" -- una síntesis no puede ser mejor
+    que las voces sobre las que se basa.):
+
+    failed:   síntesis no utilizable, O ninguna voz llegó a "complete".
+    complete: TODAS las voces son "complete" Y la síntesis es "complete".
+    partial:  al menos una voz "complete" (pero no todas) y síntesis utilizable.
     """
     synthesis_usable = synthesis_state in USABLE_STATES
     if not synthesis_usable:
         return "failed"
     if not voice_states or not any(s == "complete" for s in voice_states):
-        # ninguna voz llegó a "complete" -> failed, salvo que al menos
-        # haya contenido utilizable en alguna (entonces es partial, no failed)
-        if any(s in USABLE_STATES for s in voice_states):
-            return "partial"
         return "failed"
     if all(s == "complete" for s in voice_states) and synthesis_state == "complete":
         return "complete"

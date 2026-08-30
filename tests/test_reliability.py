@@ -207,17 +207,31 @@ class TestAccounting:
 # ── compute_decree_status() ──────────────────────────────────────────────
 
 class TestComputeDecreeStatus:
+    """Regla definitiva post-auditoría Codex sobre 6486a31: ninguna voz
+    'complete' -> SIEMPRE 'failed', sin importar el estado de la síntesis."""
+
     def test_todo_complete_es_complete(self):
         assert compute_decree_status(["complete", "complete"], "complete") == "complete"
 
-    def test_una_voz_degradada_es_partial(self):
+    def test_una_voz_degradada_otra_complete_es_partial(self):
         assert compute_decree_status(["complete", "truncated"], "complete") == "partial"
 
     def test_sintesis_no_utilizable_es_failed(self):
         assert compute_decree_status(["complete", "complete"], "empty") == "failed"
 
-    def test_ninguna_voz_complete_pero_sintesis_ok_es_partial_si_hay_utilizable(self):
-        assert compute_decree_status(["truncated", "unknown"], "complete") == "partial"
+    def test_9_truncated_sintesis_complete_es_failed(self):
+        """Caso obligatorio de la corrección: ninguna voz completó, la
+        síntesis no puede ser mejor que las voces en las que se basa."""
+        assert compute_decree_status(["truncated"] * 9, "complete") == "failed"
+
+    def test_9_unknown_sintesis_complete_es_failed(self):
+        assert compute_decree_status(["unknown"] * 9, "complete") == "failed"
+
+    def test_mezcla_truncated_unknown_sintesis_complete_es_failed(self):
+        assert compute_decree_status(["truncated", "unknown", "truncated", "unknown"], "complete") == "failed"
+
+    def test_al_menos_una_voz_complete_y_sintesis_complete_es_partial_si_no_todas(self):
+        assert compute_decree_status(["complete", "truncated", "unknown"], "complete") == "partial"
 
     def test_todas_las_voces_fallidas_es_failed(self):
         assert compute_decree_status(["error", "timeout"], "complete") == "failed"

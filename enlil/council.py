@@ -345,8 +345,15 @@ class Council:
             return _ANTHROPIC_MODEL_MAP.get(model, "claude-sonnet-5")
         return model
 
-    async def _lector_digest(self, text: str, query: str) -> str:
-        """Produce un digest estructurado del documento. Activa El Lector para docs >LECTOR_THRESHOLD."""
+    async def _lector_digest(self, text: str, query: str, deadline: float) -> str:
+        """Produce un digest estructurado del documento. Activa El Lector para
+        docs >LECTOR_THRESHOLD. Respeta el deadline global (V3-corrección #2,
+        hallazgo Codex): si no queda margen, no se lanza la llamada -- se
+        vuelve al chunker de fallback, igual que ante cualquier otro fallo."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _logger.warning("[Lector] deadline global agotado antes de generar el digest -- usando chunker de fallback")
+            return ""
         model = _LECTOR_MODELS.get(self.mode, "meta-llama/llama-4-maverick")
         client = self._anthropic_client or self._client
         try:
@@ -360,7 +367,7 @@ class Council:
                     ],
                     max_tokens=1800,
                 ),
-                timeout=90.0,
+                timeout=min(90.0, remaining),
             )
             digest = resp.choices[0].message.content or ""
             _logger.info("[Lector] Digest generado: %d chars para doc de %d chars", len(digest), len(text))
@@ -532,8 +539,14 @@ class Council:
         content = choice.message.content or ""
         finish_reason = getattr(choice, "finish_reason", None)
         has_refusal = bool(getattr(choice.message, "refusal", None))
-        has_tool_calls = bool(getattr(choice.message, "tool_calls", None)) or finish_reason in (
-            "tool_calls", "function_call",
+        # V3-corrección #4 (hallazgo Codex): faltaba comprobar el campo
+        # legacy `function_call` (distinto del `tool_calls` moderno) -- un
+        # adaptador que solo rellena `function_call` con finish_reason
+        # "stop" podía colarse como "complete".
+        has_tool_calls = (
+            bool(getattr(choice.message, "tool_calls", None))
+            or bool(getattr(choice.message, "function_call", None))
+            or finish_reason in ("tool_calls", "function_call")
         )
         usage_state, usage_fields = classify_usage(resp.usage)
         signal = AttemptSignal(
@@ -583,10 +596,22 @@ class Council:
         model = self._resolve_model(god.model)
         god_timeout = timeout_override if timeout_override is not None else GOD_TIMEOUTS.get(name, 45.0)
 
-        attempt1 = await self._attempt_or_fallback(
-            name, query, context, system_extra, max_tokens, doc_id, original_context,
-            god_timeout, model, attempt_number=1,
-        )
+        # V3-corrección #2 (hallazgo Codex): el PRIMER intento también debe
+        # respetar el deadline global, no solo el retry -- antes se lanzaba
+        # incondicionalmente con god_timeout completo aunque el deadline ya
+        # hubiese pasado (p.ej. tras un Lector o peer review muy largos).
+        remaining_before_attempt1 = deadline - time.monotonic()
+        if remaining_before_attempt1 <= 0:
+            attempt1 = AttemptResult(
+                attempt_number=1, state="timeout", content="",
+                requested_model=model, max_tokens_budget=max_tokens,
+                latency_ms=0.0, usage_state="unknown",
+            )
+        else:
+            attempt1 = await self._attempt_or_fallback(
+                name, query, context, system_extra, max_tokens, doc_id, original_context,
+                min(god_timeout, remaining_before_attempt1), model, attempt_number=1,
+            )
 
         attempt2 = None
         if self._retry_eligible(attempt1):
@@ -668,7 +693,7 @@ class Council:
 
         # El Lector: para documentos grandes genera digest antes de invocar los dioses
         if context and len(context) > LECTOR_THRESHOLD:
-            digest = await self._lector_digest(context, query)
+            digest = await self._lector_digest(context, query, deadline)
             if digest:
                 god_context = digest
                 original_context = context
@@ -771,8 +796,18 @@ class Council:
         content = _strip_analisis(resp.choices[0].message.content or "")
         finish_reason = getattr(resp.choices[0], "finish_reason", None)
         has_refusal = bool(getattr(resp.choices[0].message, "refusal", None))
+        # V3-corrección #4 (hallazgo Codex): la síntesis no-streaming nunca
+        # comprobaba tool_calls/function_call en absoluto.
+        has_tool_calls = (
+            bool(getattr(resp.choices[0].message, "tool_calls", None))
+            or bool(getattr(resp.choices[0].message, "function_call", None))
+            or finish_reason in ("tool_calls", "function_call")
+        )
         usage_state, usage_fields = classify_usage(resp.usage)
-        signal = AttemptSignal(finish_reason=finish_reason, content=content, has_refusal=has_refusal)
+        signal = AttemptSignal(
+            finish_reason=finish_reason, content=content, has_refusal=has_refusal,
+            has_unexpected_tool_calls=has_tool_calls,
+        )
         return SynthesisAttempt(
             attempt_number=attempt_number, content=content, state=classify_attempt(signal),
             requested_model=model, returned_model=getattr(resp, "model", None),
@@ -850,10 +885,21 @@ class Council:
             )
             return content, [attempt]
 
-        attempt1 = await self._synthesis_attempt_once(
-            synthesis_client, synthesis_model, synthesis_prompt, system_extra,
-            max_tokens=6000, timeout=240.0, attempt_number=1,
-        )
+        # V3-corrección #2 (hallazgo Codex): el primer intento de síntesis
+        # usaba SIEMPRE timeout=240.0 fijo, sin comprobar el deadline global
+        # -- podía sobrevivir al deadline sin que nada lo impidiera.
+        remaining_before_attempt1 = deadline - time.monotonic()
+        if remaining_before_attempt1 <= 0:
+            attempt1 = SynthesisAttempt(
+                attempt_number=1, content="", state="timeout",
+                requested_model=synthesis_model, max_tokens_budget=6000,
+                latency_ms=0.0, usage_state="unknown",
+            )
+        else:
+            attempt1 = await self._synthesis_attempt_once(
+                synthesis_client, synthesis_model, synthesis_prompt, system_extra,
+                max_tokens=6000, timeout=min(240.0, remaining_before_attempt1), attempt_number=1,
+            )
         attempts = [attempt1]
 
         attempt2 = None
@@ -906,7 +952,7 @@ class Council:
 
         # El Lector: digest para docs grandes
         if context and len(context) > LECTOR_THRESHOLD:
-            digest = await self._lector_digest(context, query)
+            digest = await self._lector_digest(context, query, deadline)
             if digest:
                 god_context = digest
                 original_context = context
@@ -1017,7 +1063,18 @@ class Council:
             else self._resolve_model("anthropic/claude-sonnet-5")
         )
 
-        remaining = max(1.0, deadline - time.monotonic())
+        # V3-corrección #2 (hallazgo Codex): "max(1.0, ...)" forzaba un
+        # timeout mínimo de 1s y ABRÍA el stream aunque el deadline global
+        # ya hubiera pasado. Ahora: si no queda margen, no se abre el
+        # stream en absoluto -- se degrada directo, sin llamada externa.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            yield SynthesisAttempt(
+                attempt_number=1, content="", state="timeout",
+                requested_model=synthesis_model, max_tokens_budget=6000,
+                latency_ms=0.0, usage_state="unknown",
+            )
+            return
         stream_timeout = min(300.0, remaining)
         collected = []
         finish_reason = None
@@ -1025,6 +1082,7 @@ class Council:
         resp_model = None
         resp_id = None
         timed_out = False
+        saw_tool_calls = False   # V3-corrección #4: acumulado entre chunks
         try:
             stream = await synthesis_client.chat.completions.create(
                 model=synthesis_model,
@@ -1046,13 +1104,24 @@ class Council:
                     fr = getattr(chunk.choices[0], "finish_reason", None)
                     if fr:
                         finish_reason = fr
-                    delta = chunk.choices[0].delta.content if chunk.choices[0].delta else None
+                        if fr in ("tool_calls", "function_call"):
+                            saw_tool_calls = True
+                    delta_obj = chunk.choices[0].delta
+                    if delta_obj and (getattr(delta_obj, "tool_calls", None) or getattr(delta_obj, "function_call", None)):
+                        saw_tool_calls = True
+                    delta = delta_obj.content if delta_obj else None
                     if delta:
                         collected.append(delta)
                         yield delta
         except asyncio.TimeoutError:
+            # V3-corrección #5 (hallazgo Codex): antes se emitía un marcador
+            # de texto al cliente ("[Sintesis: tiempo agotado...]") que NUNCA
+            # entraba en `collected` -- el cliente recibía por SSE más texto
+            # del que terminaba persistido y firmado. Ya no se emite ningún
+            # chunk extra aquí: el estado terminal (más abajo) ya comunica
+            # el timeout de forma estructurada, y lo que se persiste/firma
+            # sigue siendo EXACTAMENTE lo que ya se envió como chunks.
             timed_out = True
-            yield "\n\n[Sintesis: tiempo agotado. Decreto parcial emitido.]"
         except Exception as exc:
             content = "".join(collected)
             yield SynthesisAttempt(
@@ -1063,15 +1132,26 @@ class Council:
             )
             return
 
-        content = _strip_analisis("".join(collected))
+        # V3-corrección #5: ya NO se aplica _strip_analisis() aquí -- el
+        # contenido persistido/firmado debe ser byte-idéntico a lo ya
+        # enviado por SSE como chunks (invariante: SSE recibido = contenido
+        # persistido = contenido firmado). Antes esta transformación podía
+        # alterar el texto después de haberlo entregado ya al cliente.
+        content = "".join(collected)
         latency_ms = round((time.monotonic() - t0) * 1000, 1)
         if timed_out:
-            state = "truncated" if content.strip() else "timeout"
+            if saw_tool_calls:
+                state = "error"
+            else:
+                state = "truncated" if content.strip() else "timeout"
             usage_state, usage_fields = "unknown", {"prompt_tokens": None, "completion_tokens": None,
                                                        "reasoning_tokens": None, "total_tokens": None}
         else:
             usage_state, usage_fields = classify_usage(usage_obj)
-            signal = AttemptSignal(finish_reason=finish_reason, content=content)
+            signal = AttemptSignal(
+                finish_reason=finish_reason, content=content,
+                has_unexpected_tool_calls=saw_tool_calls,
+            )
             state = classify_attempt(signal)
         yield SynthesisAttempt(
             attempt_number=1, content=content, state=state,
@@ -1085,13 +1165,12 @@ class Council:
 
 
 
-    async def peer_review_stream(self, original_responses, original_query: str, deadline: float = None):
+    async def peer_review_stream(self, original_responses, original_query: str, deadline: float):
         """Cada dios revisa anonimamente las voces del resto desde su dominio.
         Yield PeerCritique en orden de llegada (paralelo). `deadline` es
-        opcional por compatibilidad con llamadores que aún no lo pasan
-        (V4 §2 exige que comparta el deadline global cuando el llamador
-        lo tenga disponible; internamente se usa como techo del timeout
-        por dios si se proporciona)."""
+        OBLIGATORIO (V3-corrección #2, hallazgo Codex: antes era opcional
+        con default None, un camino real por el que se podía saltar el
+        límite global -- ya no existe ese camino)."""
         anon_block = "\n\n".join(
             f"--- Respuesta {i + 1} ---\n{r.content}"
             for i, r in enumerate(original_responses)
@@ -1118,9 +1197,12 @@ class Council:
                 "PROHIBIDO: repetir el contenido de las respuestas. Solo analisis critico directo."
             )
             t0 = time.time()
-            per_god_timeout = 35.0
-            if deadline is not None:
-                per_god_timeout = max(0.1, min(35.0, deadline - time.monotonic()))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # No se inicia la llamada -- deadline global ya agotado.
+                await queue.put(PeerCritique(god_name=god_name, content="", tokens_used=0, latency_ms=0.0))
+                return
+            per_god_timeout = min(35.0, remaining)
             try:
                 resp = await asyncio.wait_for(
                     self.consult_god(

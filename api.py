@@ -279,9 +279,20 @@ async def run_query_stream(req: QueryRequest, client: dict = Depends(require_aut
     context = _truncate_context(req.context)
 
     async def event_stream():
-        decree_id_seen = ""
-        total_tokens_seen = 0
-        gods_seen: list[str] = []
+        # Corrección post-auditoría Codex sobre 6486a31 (api.py:293-305):
+        # 1) log_usage() se ejecutaba DESPUÉS de haber hecho yield del
+        #    evento "done" -- si el cliente cerraba la conexión justo al
+        #    recibir "done", el código posterior al bucle podía no llegar
+        #    a ejecutarse nunca (GeneratorExit en ese mismo yield) y el
+        #    consumo quedaba sin registrar. Ahora se registra ANTES de
+        #    emitir "done", nunca después.
+        # 2) budget_tier se registraba como `req.budget_tier or "standard"`
+        #    -- el tier crudo de la petición, ignorando que voices_count
+        #    puede resolver a un tier distinto dentro de Orchestrator
+        #    (p.ej. voices_count=9 + budget_tier ausente -> "full", pero
+        #    se registraba "standard"). Ahora se lee el tier REAL ya
+        #    persistido en el decreto.
+        usage_logged = False
         async for raw in orch.query_stream(
             req.query, context, req.budget_tier, req.parent_decree_id,
             client_id=client["id"],
@@ -291,18 +302,22 @@ async def run_query_stream(req: QueryRequest, client: dict = Depends(require_aut
             profile=COMPATIBILITY_PROFILE,
         ):
             parsed = _json.loads(raw)
-            if parsed.get("type") == "done":
+            if parsed.get("type") == "done" and not usage_logged:
                 decree_id_seen = parsed.get("decree_id", "")
                 total_tokens_seen = parsed.get("total_tokens", 0)
                 gods_seen = parsed.get("gods_convened", [])
+                resolved_tier = req.budget_tier or "standard"
+                if decree_id_seen:
+                    persisted = orch.store.get(decree_id_seen)
+                    if persisted is not None:
+                        resolved_tier = persisted.budget_tier
+                log_usage(
+                    client_id=client["id"], decree_id=decree_id_seen, tokens=total_tokens_seen,
+                    budget_tier=resolved_tier, gods_count=len(gods_seen),
+                    query_preview=req.query,
+                )
+                usage_logged = True   # nunca dos veces, aunque hubiera un segundo "done"
             yield "data: " + raw + "\n\n"
-        # usage logging -- permanece en la capa API (billing/client_id), en
-        # ambos perfiles, exactamente igual que hoy (V6 §5 fila 22).
-        log_usage(
-            client_id=client["id"], decree_id=decree_id_seen, tokens=total_tokens_seen,
-            budget_tier=req.budget_tier or "standard", gods_count=len(gods_seen),
-            query_preview=req.query,
-        )
 
     return StreamingResponse(
         event_stream(),
