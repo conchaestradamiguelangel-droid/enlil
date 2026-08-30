@@ -72,6 +72,7 @@ def env():
         gods_convened=["claude"],
         voices=[GodVoice("claude", "claude-sonnet", "respuesta para A", 10, 50.0)],
         synthesis="sintesis de A", total_tokens=10,
+        status="complete", signature_payload_version=2,
     )
     seed_store.save(decree_a, client_id=a["client_id"])
 
@@ -80,6 +81,7 @@ def env():
         gods_convened=["claude"],
         voices=[GodVoice("claude", "claude-sonnet", "respuesta para B", 10, 50.0)],
         synthesis="sintesis de B", total_tokens=10,
+        status="complete", signature_payload_version=2,
     )
     seed_store.save(decree_b, client_id=b["client_id"])
     seed_store._connection.close()
@@ -258,6 +260,7 @@ class TestLegacyDefaultYaNoEsBypassUniversal:
             gods_convened=["claude"],
             voices=[GodVoice("claude", "claude-sonnet", "respuesta legacy", 10, 50.0)],
             synthesis="sintesis legacy", total_tokens=10,
+            status="complete", signature_payload_version=2,
         )
         seed_store.save(legacy, client_id="default")
         seed_store._connection.close()
@@ -304,7 +307,7 @@ class TestClientIdPropagadoEnEndpointsDeAnalisis:
     @pytest.fixture(scope="class")
     def legal_decree_id(self, env):
         with patch.object(env["orch"].council, "convene", new=AsyncMock(return_value=[_mock_god_response()])), \
-             patch.object(env["orch"].council, "synthesize", new=AsyncMock(return_value="Analisis legal mock, sin datos reales")):
+             patch.object(env["orch"].council, "synthesize", new=AsyncMock(return_value=("Analisis legal mock, sin datos reales", []))):
             r = env["client"].post(
                 "/legal/analyze",
                 json={"type": "contrato", "text": "Texto de contrato de prueba, sin datos reales.", "jurisdiction": "España"},
@@ -316,7 +319,7 @@ class TestClientIdPropagadoEnEndpointsDeAnalisis:
     @pytest.fixture(scope="class")
     def analyze_doc_decree_id(self, env):
         with patch.object(env["orch"].council, "convene", new=AsyncMock(return_value=[_mock_god_response()])), \
-             patch.object(env["orch"].council, "synthesize", new=AsyncMock(return_value="Analisis de documento mock")):
+             patch.object(env["orch"].council, "synthesize", new=AsyncMock(return_value=("Analisis de documento mock", []))):
             r = env["client"].post(
                 "/analyze-doc",
                 files={"file": ("test.txt", b"contenido de prueba, sin datos sensibles", "text/plain")},

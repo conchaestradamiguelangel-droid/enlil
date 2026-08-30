@@ -29,7 +29,7 @@ class TestOrchestratorIntegration:
         orch = build_orch()
         responses = [make_mock_response("claude"), make_mock_response("ninurta")]
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=responses)), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="Sintesis mock")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("Sintesis mock", []))):
             decree = asyncio.run(orch.query("hay una vulnerabilidad en el firewall"))
 
         assert isinstance(decree, Decree)
@@ -39,7 +39,7 @@ class TestOrchestratorIntegration:
     def test_query_persists_decree(self):
         orch = build_orch()
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=[make_mock_response("claude")])), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="ok")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("ok", []))):
             decree = asyncio.run(orch.query("test persistencia"))
 
         assert orch.get_decree(decree.id) is not None
@@ -48,7 +48,7 @@ class TestOrchestratorIntegration:
     def test_query_classifies_domains(self):
         orch = build_orch()
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=[make_mock_response("claude")])), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="ok")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("ok", []))):
             decree = asyncio.run(orch.query("bug en el código python"))
 
         assert "technical" in decree.domains
@@ -56,7 +56,7 @@ class TestOrchestratorIntegration:
     def test_query_with_explicit_budget_tier(self):
         orch = build_orch()
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=[make_mock_response("claude")])), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="ok")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("ok", []))):
             decree = asyncio.run(orch.query("hola", budget_tier="minimal"))
 
         assert decree.budget_tier == "minimal"
@@ -64,7 +64,7 @@ class TestOrchestratorIntegration:
     def test_query_with_parent_decree_id(self):
         orch = build_orch()
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=[make_mock_response("claude")])), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="ok")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("ok", []))):
             parent = asyncio.run(orch.query("consulta padre"))
             child = asyncio.run(orch.query("consulta hija", parent_decree_id=parent.id))
 
@@ -73,7 +73,7 @@ class TestOrchestratorIntegration:
     def test_feedback_updates_reputation(self):
         orch = build_orch()
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=[make_mock_response("claude"), make_mock_response("ninurta")])), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="ok")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("ok", []))):
             decree = asyncio.run(orch.query("vulnerabilidad de seguridad"))
 
         score_before = orch.pantheon["claude"].get_reputation("security")
@@ -88,7 +88,7 @@ class TestOrchestratorIntegration:
     def test_history_returns_decrees(self):
         orch = build_orch()
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=[make_mock_response("claude")])), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="ok")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("ok", []))):
             asyncio.run(orch.query("primera"))
             asyncio.run(orch.query("segunda"))
 
@@ -97,7 +97,7 @@ class TestOrchestratorIntegration:
     def test_history_limit_respected(self):
         orch = build_orch()
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=[make_mock_response("claude")])), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="ok")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("ok", []))):
             for i in range(5):
                 asyncio.run(orch.query(f"consulta {i}"))
 
@@ -110,7 +110,7 @@ class TestOrchestratorIntegration:
     def test_memory_stores_decree(self):
         orch = build_orch()
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=[make_mock_response("claude")])), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="Sintesis sobre firewall seguridad")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("Sintesis sobre firewall seguridad", []))):
             asyncio.run(orch.query("configurar firewall seguridad"))
 
         # La memoria debe tener al menos 1 entrada (orch.query() sin
@@ -125,7 +125,7 @@ class TestOrchestratorIntegration:
             make_mock_response("enki", "Respuesta tecnica"),
         ]
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=responses)), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="ok")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("ok", []))):
             decree = asyncio.run(orch.query("test voces"))
 
         assert len(decree.voices) == 2
@@ -140,7 +140,7 @@ class TestOrchestratorIntegration:
             make_mock_response("ninurta"),  # 100 tokens
         ]
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=responses)), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="ok")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("ok", []))):
             decree = asyncio.run(orch.query("test tokens"))
 
         assert decree.total_tokens == 200

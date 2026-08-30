@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from enlil.telemetry import span, record_decree, record_batch
 import sqlite3
 import os
@@ -26,8 +27,24 @@ from .evolution import apply_decay, fitness_report
 from .rl_controller import RLController
 from .verticals.legal import LEGAL_GOD_OVERRIDES
 from .verticals.cybersecurity import CYBER_GOD_OVERRIDES
+from .gods.registry import GOD_TIMEOUTS
+from .reliability import (
+    select_operative_attempt, select_operative_synthesis, compute_decree_status,
+    aggregate_accounting_state, compute_known_subtotal, compute_observed_total,
+    COMPATIBILITY_PROFILE, StreamingBehaviorProfile,
+)
 
 DEFAULT_DB = os.environ.get("ENLIL_DB", "enlil.db")
+
+
+def _total_budget_seconds(god_names: list[str], pantheon: dict) -> float:
+    """Presupuesto total ÚNICO para toda la consulta (V4 §2) -- cubre el
+    peor caso de deliberación + 1 retry por voz + síntesis con su propio
+    retry (240s x2). No es un objetivo de latencia, es un techo de
+    seguridad: la política de retry ya evita lanzar un segundo intento
+    si no queda margen real (ver Council._consult_god_with_retry)."""
+    max_god_timeout = max((GOD_TIMEOUTS.get(n, 45.0) for n in god_names), default=90.0)
+    return (2 * max_god_timeout) + 30.0 + (2 * 240.0)
 
 
 class Orchestrator:
@@ -62,6 +79,7 @@ class Orchestrator:
         client_id: str = "default",
         system_extra: str = "",
     ) -> Decree:
+        t_start = time.monotonic()
         domains = classify_query(text)
         budget = resolve_budget(text, budget_tier)
 
@@ -100,30 +118,68 @@ class Orchestrator:
         doc_id = None
         if context and len(context) > RAG_THRESHOLD and self.rag.is_available:
             doc_id = self.rag.ingest(context)
-        responses: list[GodResponse] = await self.council.convene(god_names, text, context, god_overrides=god_overrides, doc_id=doc_id, global_system_extra=system_extra)
-        synthesis = await self.council.synthesize(responses, text, budget_tier=budget.tier, system_extra=system_extra)
+
+        # Deadline único para toda la consulta (V4 §2) -- deliberación,
+        # reintentos de voz y síntesis (con su propio reintento) comparten
+        # el mismo presupuesto absoluto, nunca uno propio por función.
+        deadline = time.monotonic() + _total_budget_seconds(god_names, self.pantheon)
+        # Fix de un bug real (V3 §1.2): /query usaba SIEMPRE max_tokens=2048
+        # por voz sin importar el tier, mientras /query/stream ya ajustaba a
+        # 3000 para tier "full" -- inconsistencia directamente relevante
+        # para la fiabilidad que mide TEST 01B, no una mejora de calidad.
+        max_tok_god = 3000 if budget.tier == "full" else 2048
+        responses: list[GodResponse] = await self.council.convene(
+            god_names, text, context, god_overrides=god_overrides, doc_id=doc_id,
+            global_system_extra=system_extra, max_tokens=max_tok_god, deadline=deadline,
+        )
+        synthesis_content, synthesis_attempts = await self.council.synthesize(
+            responses, text, budget_tier=budget.tier, system_extra=system_extra, deadline=deadline,
+        )
 
         voices = [
             GodVoice(
                 god_name=r.god_name, model=r.model, content=r.content,
                 tokens_used=r.tokens_used, latency_ms=r.latency_ms, dissent=r.dissent,
+                voice_status=r.voice_status, finish_reason=r.finish_reason,
+                retry_count=r.retry_count, returned_model=r.returned_model,
+                reasoning_tokens=r.reasoning_tokens, usage_state=r.usage_state,
+                attempts=r.attempts,
             )
             for r in responses
         ]
+
+        voice_states = [r.voice_status for r in responses]
+        synthesis_operative = select_operative_synthesis(synthesis_attempts)
+        status = compute_decree_status(voice_states, synthesis_operative.state)
+
+        all_components = [a for r in responses for a in r.attempts] + list(synthesis_attempts)
+        accounting_state = aggregate_accounting_state([c.usage_state for c in all_components])
+        known_subtotal = compute_known_subtotal(all_components)
+        observed_total = compute_observed_total(accounting_state, known_subtotal)
+
+        wall_clock_ms = round((time.monotonic() - t_start) * 1000, 1)
+
         decree = Decree(
             query=text, domains=domains, gods_convened=god_names,
-            voices=voices, synthesis=synthesis,
-            total_tokens=sum(r.tokens_used for r in responses),
+            voices=voices, synthesis=synthesis_content,
+            total_tokens=sum(r.tokens_used for r in responses),   # SIN CAMBIOS -- ver v3/v4 §12
             budget_tier=budget.tier, parent_decree_id=parent_decree_id,
             predicted_scores=predicted_scores,
+            status=status,
+            signature_payload_version=2,   # decreto nuevo -- Orchestrator decide, Store solo exige (V4 §8)
+            wall_clock_ms=wall_clock_ms,
+            accounting_state=accounting_state,
+            known_token_subtotal=known_subtotal,
+            observed_total_tokens=observed_total,
+            synthesis_attempts=synthesis_attempts,
         )
 
         self.store.save(decree, client_id=client_id)
 
-        # Telemetría
-        _latency = sum(v.latency_ms for v in decree.voices)
+        # Telemetría -- wall_clock_ms real, NO la suma de latencias en
+        # paralelo (bug real corregido, V6 riesgo declarado en v5/v6).
         _domain = decree.domains[0] if decree.domains else "general"
-        record_decree(decree.budget_tier, _domain, _latency, decree.total_tokens)
+        record_decree(decree.budget_tier, _domain, wall_clock_ms, decree.total_tokens)
         with span(
             "enlil.query",
             decree_id=decree.id,
@@ -131,7 +187,8 @@ class Orchestrator:
             domain=_domain,
             gods_count=len(decree.gods_convened),
             total_tokens=decree.total_tokens,
-            latency_ms=round(_latency, 1),
+            latency_ms=wall_clock_ms,
+            status=decree.status,
         ):
             pass
         self.memory.store(decree)
@@ -201,21 +258,42 @@ class Orchestrator:
         budget_tier: str | None = None,
         parent_decree_id: str | None = None,
         client_id: str = "default",
+        voices_count: int | None = None,
+        timeout_override: float | None = None,
+        peer_review: bool = False,
+        profile: StreamingBehaviorProfile = COMPATIBILITY_PROFILE,
     ):
-        """Async generator -- yields JSON strings for SSE events."""
+        """Async generator -- yields JSON strings para SSE. Implementación
+        CANÓNICA de streaming (V5/V6 §6) -- api.py::run_query_stream() es
+        un delegado mínimo sobre este método. `profile` controla EXCLUSIVAMENTE
+        los efectos laterales/campos documentados en la matriz de
+        ENLIL_TEST01B_AUDITORIA_DISENO_V6.md §5; el contrato de campos base
+        (`god`, `synthesis_token`/`token`, `done`) es el mismo que ya sirve
+        /query/stream hoy en producción, congelado a propósito durante
+        TEST 01B. peer_review/voices_count/timeout_override NO son parte
+        del perfil -- son parámetros de la petición, implementados aquí
+        completos (antes solo existían en la ruta inline de api.py)."""
         import json as _json
+        t_start = time.monotonic()
         domains = classify_query(text)
-        budget = resolve_budget(text, budget_tier)
+        _tier = budget_tier
+        if voices_count == 2:
+            _tier = "minimal"
+        elif voices_count == 4:
+            _tier = "standard"
+        elif voices_count == 9:
+            _tier = "full"
+        budget = resolve_budget(text, _tier)
 
         predicted_scores: dict[str, float] = {}
-        if domains:
+        if profile.compute_predicted_scores and domains:
             for _name in self.pantheon:
                 _avg_w = sum(self.rl.get_policy_weight(_name, d) for d in domains) / len(domains)
                 predicted_scores[_name] = round((_avg_w / 2.0) * 10.0, 2)
 
         god_names = select_gods(domains, self.pantheon, budget.tier)
 
-        # Aislada por client_id (fix P0 2026-08-29) — mismo motivo que en query().
+        # Memoria de entrada -- misma en ambos perfiles, verificado (V6 §5, fila 9).
         if self.qdrant.is_available:
             memory_context = self.qdrant.search(text, limit=3, client_id=client_id)
         else:
@@ -223,7 +301,7 @@ class Orchestrator:
         if memory_context:
             context = context + "\n\nDecretos anteriores relevantes:\n" + memory_context
 
-        if self.corpus:
+        if profile.use_corpus and self.corpus:
             corpus_context = self.corpus.search(text, limit=2)
             if corpus_context:
                 context = context + "\n\nSabiduria ancestral del panteon:\n" + corpus_context
@@ -237,71 +315,140 @@ class Orchestrator:
             god_overrides = None
 
         doc_id = None
-        if context and len(context) > RAG_THRESHOLD and self.rag.is_available:
+        if profile.use_rag and context and len(context) > RAG_THRESHOLD and self.rag.is_available:
             doc_id = self.rag.ingest(context)
 
-        yield _json.dumps({"type": "init", "gods": god_names, "domains": domains, "budget_tier": budget.tier})
+        if profile.emit_init_event:
+            yield _json.dumps({"type": "init", "gods": god_names, "domains": domains, "budget_tier": budget.tier})
 
-        responses = []
-        async for god_resp in self.council.convene_stream(god_names, text, context, god_overrides=god_overrides, doc_id=doc_id):
+        deadline = t_start + _total_budget_seconds(god_names, self.pantheon)
+        max_tok_god = 3000 if budget.tier == "full" else 2048
+
+        responses: list[GodResponse] = []
+        async for god_resp in self.council.convene_stream(
+            god_names, text, context, god_overrides=god_overrides, doc_id=doc_id,
+            max_tokens=max_tok_god, timeout_override=timeout_override, deadline=deadline,
+        ):
             responses.append(god_resp)
-            yield _json.dumps({
+            god_event = {
                 "type": "god",
                 "god": god_resp.god_name,
                 "content": god_resp.content,
                 "tokens": god_resp.tokens_used,
                 "latency_ms": god_resp.latency_ms,
                 "dissent": god_resp.dissent,
-                "model": god_resp.model,
+            }
+            if profile.include_model_in_god_event:
+                god_event["model"] = god_resp.model
+            yield _json.dumps(god_event)
+
+        peer_critiques = []
+        if peer_review and responses:
+            yield _json.dumps({
+                "type": "peer_review_init",
+                "reviewers": [r.god_name for r in responses],
+                "total": len(responses),
             })
+            async for critique in self.council.peer_review_stream(responses, text, deadline=deadline):
+                peer_critiques.append(critique)
+                yield _json.dumps({
+                    "type": "peer_critique",
+                    "god": critique.god_name,
+                    "content": critique.content,
+                    "tokens": critique.tokens_used,
+                    "latency_ms": critique.latency_ms,
+                })
 
-        synthesis_parts = []
-        async for chunk in self.council.synthesize_stream(responses, text, budget_tier=budget.tier):
-            synthesis_parts.append(chunk)
-            yield _json.dumps({"type": "synthesis_chunk", "text": chunk})
+        synthesis_attempts = []
+        final_synthesis_attempt = None
+        async for item in self.council.synthesize_stream(
+            responses, text, budget_tier=budget.tier,
+            peer_critiques=peer_critiques if peer_critiques else None,
+            deadline=deadline,
+        ):
+            if isinstance(item, str):
+                yield _json.dumps({"type": "synthesis_token", "token": item})
+            else:
+                # último elemento -- SynthesisAttempt terminal estructurado (V5 §6.1).
+                final_synthesis_attempt = item
+                synthesis_attempts.append(item)
 
-        synthesis = "".join(synthesis_parts)
+        synthesis = final_synthesis_attempt.content if final_synthesis_attempt else ""
 
         voices = [
             GodVoice(
                 god_name=r.god_name, model=r.model, content=r.content,
                 tokens_used=r.tokens_used, latency_ms=r.latency_ms, dissent=r.dissent,
+                voice_status=r.voice_status, finish_reason=r.finish_reason,
+                retry_count=r.retry_count, returned_model=r.returned_model,
+                reasoning_tokens=r.reasoning_tokens, usage_state=r.usage_state,
+                attempts=r.attempts,
             )
             for r in responses
         ]
+
+        voice_states = [r.voice_status for r in responses]
+        synthesis_state = final_synthesis_attempt.state if final_synthesis_attempt else "unknown"
+        status = compute_decree_status(voice_states, synthesis_state)
+
+        all_components = [a for r in responses for a in r.attempts] + list(synthesis_attempts)
+        accounting_state = aggregate_accounting_state([c.usage_state for c in all_components])
+        known_subtotal = compute_known_subtotal(all_components)
+        observed_total = compute_observed_total(accounting_state, known_subtotal)
+        wall_clock_ms = round((time.monotonic() - t_start) * 1000, 1)
+
         decree = Decree(
             query=text, domains=domains, gods_convened=god_names,
             voices=voices, synthesis=synthesis,
             total_tokens=sum(r.tokens_used for r in responses),
-            budget_tier=budget.tier, parent_decree_id=parent_decree_id,
+            budget_tier=budget.tier,
+            # V6 §5 fila 18/19 -- hallazgo real: api.py::run_query_stream()
+            # ignora hoy parent_decree_id aunque el cliente lo envíe. Se
+            # replica ese comportamiento TAL CUAL en COMPATIBILITY_PROFILE
+            # (corregirlo sería un cambio funcional fuera de alcance de
+            # TEST 01B, ver "No hacer" -- registrado como bug aparte).
+            parent_decree_id=(parent_decree_id if profile.thread_parent_decree_id else None),
             predicted_scores=predicted_scores,
+            status=status,
+            signature_payload_version=2,
+            wall_clock_ms=wall_clock_ms,
+            accounting_state=accounting_state,
+            known_token_subtotal=known_subtotal,
+            observed_total_tokens=observed_total,
+            synthesis_attempts=synthesis_attempts,
         )
         self.store.save(decree, client_id=client_id)
-        _latency = sum(v.latency_ms for v in decree.voices)
-        _domain = decree.domains[0] if decree.domains else "general"
-        record_decree(decree.budget_tier, _domain, _latency, decree.total_tokens)
-        with span("enlil.query", decree_id=decree.id, budget_tier=decree.budget_tier,
-                  domain=_domain, gods_count=len(decree.gods_convened),
-                  total_tokens=decree.total_tokens, latency_ms=round(_latency, 1)):
-            pass
-        self.memory.store(decree)
+
+        if profile.record_decree_telemetry:
+            _domain = decree.domains[0] if decree.domains else "general"
+            record_decree(decree.budget_tier, _domain, wall_clock_ms, decree.total_tokens)
+            with span("enlil.query", decree_id=decree.id, budget_tier=decree.budget_tier,
+                      domain=_domain, gods_count=len(decree.gods_convened),
+                      total_tokens=decree.total_tokens, latency_ms=wall_clock_ms,
+                      status=decree.status):
+                pass
+        if profile.write_sqlite_memory:
+            self.memory.store(decree)
         if self.qdrant.is_available:
             self.qdrant.store(decree)
-        self.meta.observe(decree)
-        apply_decay(god_names, self.pantheon)
-        task = asyncio.create_task(self._evaluate_and_learn(decree))
-        task.add_done_callback(_on_eval_done)
+        if profile.do_meta_observe:
+            self.meta.observe(decree)
+        if profile.do_reputation_decay:
+            apply_decay(god_names, self.pantheon)
+        if profile.do_rl_learning:
+            task = asyncio.create_task(self._evaluate_and_learn(decree))
+            task.add_done_callback(_on_eval_done)
 
         yield _json.dumps({
             "type": "done",
             "decree_id": decree.id,
-            "domains": decree.domains,
-            "gods_convened": decree.gods_convened,
-            "total_tokens": decree.total_tokens,
-            "budget_tier": decree.budget_tier,
-            "has_dissent": decree.has_dissent(),
-            "dissenting_gods": decree.dissenting_gods(),
             "pq_signed": bool(decree.pq_signature),
+            "total_tokens": decree.total_tokens,
+            "gods_convened": decree.gods_convened,
+            "peer_review": [
+                {"god": c.god_name, "content": c.content, "tokens": c.tokens_used}
+                for c in peer_critiques
+            ],
         })
 
     def system_mode(self) -> dict:

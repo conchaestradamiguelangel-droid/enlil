@@ -46,8 +46,13 @@ def _load_or_generate_keypair() -> tuple[bytes, bytes]:
         return b"", b""
 
 
-def _decree_payload(decree_id: str, query: str, synthesis: str, timestamp: float) -> bytes:
-    """Contenido canónico que se firma — reproducible y determinista."""
+_VALID_STATUSES = ("complete", "partial", "failed")
+
+
+def _decree_payload_v1(decree_id: str, query: str, synthesis: str, timestamp: float) -> bytes:
+    """Serialización histórica — CONGELADA, byte-idéntica para siempre.
+    No tocar nunca: cualquier cambio aquí invalidaría todas las firmas
+    ya emitidas antes de TEST 01B (Fase 1, Fase 2, TEST 01)."""
     canonical = json.dumps({
         "id": decree_id,
         "query": query,
@@ -57,36 +62,90 @@ def _decree_payload(decree_id: str, query: str, synthesis: str, timestamp: float
     return hashlib.sha256(canonical.encode()).digest()
 
 
-def sign_decree(decree_id: str, query: str, synthesis: str, timestamp: float) -> str:
-    """Firma un Decreto. Devuelve la firma en base64 o cadena vacía si oqs no disponible."""
+def _decree_payload_v2(decree_id: str, query: str, synthesis: str, timestamp: float, status: str) -> bytes:
+    """Nueva serialización (TEST 01B) — status es obligatorio, cubre
+    inequívocamente la completitud del decreto."""
+    canonical = json.dumps({
+        "payload_version": 2,
+        "id": decree_id,
+        "query": query,
+        "synthesis": synthesis,
+        "timestamp": timestamp,
+        "status": status,
+    }, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode()).digest()
+
+
+def _decree_payload(decree_id, query, synthesis, timestamp, *, payload_version: int, status: str | None = None) -> bytes:
+    if payload_version == 1:
+        return _decree_payload_v1(decree_id, query, synthesis, timestamp)
+    if payload_version == 2:
+        if status not in _VALID_STATUSES:
+            raise ValueError(f"payload_version=2 requiere status en {_VALID_STATUSES}, recibido: {status!r}")
+        return _decree_payload_v2(decree_id, query, synthesis, timestamp, status)
+    raise ValueError(f"payload_version no soportado: {payload_version!r} — fail closed, nunca se infiere")
+
+
+def sign_decree(decree_id: str, query: str, synthesis: str, timestamp: float,
+                 *, payload_version: int, status: str | None = None) -> str:
+    """Firma un Decreto. Devuelve la firma en base64 o cadena vacía si oqs no disponible.
+
+    payload_version es OBLIGATORIO (sin default) — quien firma decide
+    explícitamente qué formato usa, nunca se asume. payload_version=1
+    reproduce exactamente el formato histórico; payload_version=2 exige
+    `status` en {complete, partial, failed}.
+    """
     try:
         import oqs
         private_key, _ = _load_or_generate_keypair()
         if not private_key:
             return ""
-        payload = _decree_payload(decree_id, query, synthesis, timestamp)
+        payload = _decree_payload(decree_id, query, synthesis, timestamp,
+                                   payload_version=payload_version, status=status)
         with oqs.Signature(_ALGORITHM, secret_key=private_key) as signer:
             signature = signer.sign(payload)
         return base64.b64encode(signature).decode()
+    except ValueError:
+        raise   # fail closed — nunca se convierte una versión/status inválidos en firma vacía silenciosa
     except Exception as e:
         logger.error("sign_decree failed: %s", e)
         return ""
 
 
-def verify_decree(decree_id: str, query: str, synthesis: str, timestamp: float, signature_b64: str) -> bool:
-    """Verifica la firma PQ de un Decreto. False si oqs no disponible o firma inválida."""
+def verify_decree(decree_id: str, query: str, synthesis: str, timestamp: float, signature_b64: str,
+                   *, payload_version: int | None, status: str | None = None) -> bool:
+    """Verifica la firma PQ de un Decreto. False si oqs no disponible o firma inválida.
+
+    payload_version es OBLIGATORIO (aunque tipado Optional para poder
+    representar explícitamente "sin versión conocida") — un valor None,
+    o cualquiera que no sea 1 o 2, es un fallo cerrado (ValueError), NUNCA
+    se infiere ni se asume v1 por defecto (ver DecreeStore.verify()).
+    """
     if not signature_b64:
         return False
+    if payload_version not in (1, 2):
+        raise ValueError(
+            f"payload_version desconocido o ausente ({payload_version!r}) — "
+            f"no se puede verificar sin asumir una versión. Fail closed."
+        )
     try:
         import oqs
         _, public_key = _load_or_generate_keypair()
         if not public_key:
             return False
-        payload = _decree_payload(decree_id, query, synthesis, timestamp)
+        payload = _decree_payload(decree_id, query, synthesis, timestamp,
+                                   payload_version=payload_version, status=status)
         signature = base64.b64decode(signature_b64)
         with oqs.Signature(_ALGORITHM) as verifier:
             return verifier.verify(payload, signature, public_key)
     except Exception as e:
+        # NOTA: el fail-closed de payload_version ya se resolvió ANTES de
+        # este try (arriba) -- aquí NUNCA se distingue ValueError, porque
+        # base64.b64decode() de una firma corrupta lanza binascii.Error,
+        # que en CPython hereda de ValueError. Re-lanzarlo aquí convertiría
+        # "firma corrupta" en una excepción no controlada en vez de
+        # False -- justo el caso que test_verify_decree_invalid_signature
+        # protege.
         logger.error("verify_decree failed: %s", e)
         return False
 

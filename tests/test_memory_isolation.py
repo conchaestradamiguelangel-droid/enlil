@@ -236,7 +236,7 @@ class TestFugaCerradaEnPipelineCompleto:
         # completo orch.query() (no un store() directo) para que quede
         # exactamente como quedaría en producción.
         with patch.object(orch.council, "convene", new=AsyncMock(return_value=[_mock_god_response(f"respuesta B {SECRET_MARKER_B}")])), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=f"sintesis confidencial de B {SECRET_MARKER_B}")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=(f"sintesis confidencial de B {SECRET_MARKER_B}", []))):
             asyncio.run(orch.query(f"analisis de fusion empresarial {SECRET_MARKER_B}", client_id="cliente-b"))
 
         # A hace una consulta semánticamente equivalente. Capturamos el
@@ -248,7 +248,7 @@ class TestFugaCerradaEnPipelineCompleto:
             return [_mock_god_response("respuesta A")]
 
         with patch.object(orch.council, "convene", new=_capturing_convene), \
-             patch.object(orch.council, "synthesize", new=AsyncMock(return_value="sintesis de A")):
+             patch.object(orch.council, "synthesize", new=AsyncMock(return_value=("sintesis de A", []))):
             asyncio.run(orch.query("analisis de fusion empresarial", client_id="cliente-a"))
 
         assert SECRET_MARKER_B not in captured["context"], (

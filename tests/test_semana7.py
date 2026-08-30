@@ -15,39 +15,41 @@ def test_quantum_is_available_returns_bool():
 
 
 def test_sign_decree_returns_string():
-    sig = sign_decree("test-id", "query test", "synthesis test", 1234567890.0)
+    # payload_version=1 -- estos tests validan el formato histórico congelado,
+    # el mismo que ya firmó todos los decretos anteriores a TEST 01B.
+    sig = sign_decree("test-id", "query test", "synthesis test", 1234567890.0, payload_version=1)
     assert isinstance(sig, str)
 
 
 def test_sign_decree_nonempty_when_pq_available():
     if not is_available():
         pytest.skip("oqs no disponible en este entorno")
-    sig = sign_decree("test-id", "query", "synthesis", 1234567890.0)
+    sig = sign_decree("test-id", "query", "synthesis", 1234567890.0, payload_version=1)
     assert len(sig) > 0
 
 
 def test_verify_decree_valid_signature():
     if not is_available():
         pytest.skip("oqs no disponible en este entorno")
-    sig = sign_decree("abc", "mi consulta", "mi síntesis", 9999.0)
-    assert verify_decree("abc", "mi consulta", "mi síntesis", 9999.0, sig) is True
+    sig = sign_decree("abc", "mi consulta", "mi síntesis", 9999.0, payload_version=1)
+    assert verify_decree("abc", "mi consulta", "mi síntesis", 9999.0, sig, payload_version=1) is True
 
 
 def test_verify_decree_invalid_signature():
     if not is_available():
         pytest.skip("oqs no disponible en este entorno")
-    assert verify_decree("abc", "query", "synthesis", 9999.0, "firma_falsa_xxx") is False
+    assert verify_decree("abc", "query", "synthesis", 9999.0, "firma_falsa_xxx", payload_version=1) is False
 
 
 def test_verify_decree_tampered_synthesis():
     if not is_available():
         pytest.skip("oqs no disponible en este entorno")
-    sig = sign_decree("abc", "query", "synthesis original", 9999.0)
-    assert verify_decree("abc", "query", "synthesis MANIPULADO", 9999.0, sig) is False
+    sig = sign_decree("abc", "query", "synthesis original", 9999.0, payload_version=1)
+    assert verify_decree("abc", "query", "synthesis MANIPULADO", 9999.0, sig, payload_version=1) is False
 
 
 def test_verify_decree_empty_signature_returns_false():
-    assert verify_decree("abc", "query", "synthesis", 9999.0, "") is False
+    assert verify_decree("abc", "query", "synthesis", 9999.0, "", payload_version=1) is False
 
 
 def test_public_key_b64_returns_string():
@@ -72,6 +74,8 @@ def _make_decree(query="consulta test", synthesis="síntesis test") -> Decree:
         voices=[GodVoice("claude", "claude-sonnet-4-6", "respuesta", 100, 500.0)],
         total_tokens=100,
         budget_tier="standard",
+        status="complete",
+        signature_payload_version=2,
     )
 
 

@@ -17,6 +17,10 @@ from .chunker import chunk_for_god, CHUNK_THRESHOLD
 from .document_rag import RAG_THRESHOLD
 LECTOR_THRESHOLD = 50_000   # chars -- por encima activa El Lector (digest estructurado)
 from .telemetry import record_god_call, span
+from .reliability import (
+    AttemptSignal, AttemptResult, SynthesisAttempt, USABLE_STATES,
+    classify_attempt, classify_usage, select_operative_attempt,
+)
 
 
 
@@ -375,7 +379,13 @@ class Council:
         timeout: float = 45.0,
         doc_id: Optional[str] = None,
         original_context: str = "",
-    ) -> GodResponse:
+        attempt_number: int = 1,
+    ) -> AttemptResult:
+        """Un único intento de llamada al modelo de `god_name`. Devuelve
+        un AttemptResult clasificado por classify_attempt() (TEST 01B) —
+        NUNCA un GodResponse directamente; la construcción del GodResponse
+        final (con el intento operativo elegido) vive en
+        _consult_god_with_retry()."""
         god = self.pantheon[god_name]
         _today = date.today().strftime("%d de %B de %Y")
         _query_type = _classify_query(query)
@@ -461,22 +471,18 @@ class Council:
                         ),
                         timeout=timeout,
                     )
-                    return GodResponse(
-                        god_name=god_name,
-                        model=f"{fallback_model}[fallback]",
-                        content=resp.choices[0].message.content or "",
-                        tokens_used=resp.usage.total_tokens if resp.usage else 0,
-                        latency_ms=round((time.monotonic() - t0) * 1000, 1),
+                    latency = (time.monotonic() - t0) * 1000
+                    return self._build_attempt_result(
+                        resp, requested_model=f"{fallback_model}[fallback]",
+                        max_tokens=max_tokens, latency_ms=latency, attempt_number=attempt_number,
                     )
                 except Exception as _fb_exc:
                     _logger.warning("Anthropic fallback also failed for %s: %s", god_name, _fb_exc, exc_info=_fb_exc)
-            return GodResponse(
-                god_name=god_name,
-                model=model,
-                content="[CIRCUIT_OPEN]: OpenRouter no disponible temporalmente",
-                tokens_used=0,
-                latency_ms=0.0,
-                dissent="circuit_open",
+            return AttemptResult(
+                attempt_number=attempt_number,
+                state=classify_attempt(AttemptSignal(circuit_open=True)),
+                content="", requested_model=model, max_tokens_budget=max_tokens,
+                latency_ms=0.0, usage_state="unknown",
             )
 
         # Llamada normal — tracking de fallos para el circuit breaker
@@ -506,56 +512,144 @@ class Council:
         record_god_call(god_name, model, resp.usage.total_tokens if resp.usage else 0, latency)
 
         _content = resp.choices[0].message.content or ""
-        _god_resp = GodResponse(
-            god_name=god_name,
-            model=model,
-            content=_content,
-            tokens_used=resp.usage.total_tokens if resp.usage else 0,
-            latency_ms=round(latency, 1),
-        )
         for _ln in _content.split("\n"):
             if _ln.strip().upper().startswith("PERSPECTIVA:"):
                 _store_perspective("", god_name, _query_type, _ln.split(":",1)[-1].strip())
                 break
-        return _god_resp
+        return self._build_attempt_result(
+            resp, requested_model=model, max_tokens=max_tokens,
+            latency_ms=latency, attempt_number=attempt_number,
+        )
 
-    async def _consult_god_safe(
+    @staticmethod
+    def _build_attempt_result(resp, *, requested_model: str, max_tokens: int,
+                               latency_ms: float, attempt_number: int) -> AttemptResult:
+        """Construye un AttemptResult a partir de una respuesta cruda de
+        la API (éxito estructural, sin excepción). Única función que lee
+        finish_reason/usage/refusal/tool_calls — classify_attempt() nunca
+        recibe el objeto `resp` crudo, solo la señal ya extraída."""
+        choice = resp.choices[0]
+        content = choice.message.content or ""
+        finish_reason = getattr(choice, "finish_reason", None)
+        has_refusal = bool(getattr(choice.message, "refusal", None))
+        has_tool_calls = bool(getattr(choice.message, "tool_calls", None)) or finish_reason in (
+            "tool_calls", "function_call",
+        )
+        usage_state, usage_fields = classify_usage(resp.usage)
+        signal = AttemptSignal(
+            finish_reason=finish_reason, content=content,
+            has_refusal=has_refusal, has_unexpected_tool_calls=has_tool_calls,
+        )
+        return AttemptResult(
+            attempt_number=attempt_number,
+            state=classify_attempt(signal),
+            content=content,
+            requested_model=requested_model,
+            returned_model=getattr(resp, "model", None),
+            finish_reason=finish_reason,
+            prompt_tokens=usage_fields["prompt_tokens"],
+            completion_tokens=usage_fields["completion_tokens"],
+            reasoning_tokens=usage_fields["reasoning_tokens"],
+            total_tokens=usage_fields["total_tokens"],
+            usage_state=usage_state,
+            reasoning_present=usage_fields["reasoning_tokens"] is not None,
+            max_tokens_budget=max_tokens,
+            latency_ms=round(latency_ms, 1),
+            generation_id=getattr(resp, "id", None),
+        )
+
+    @staticmethod
+    def _retry_eligible(attempt: AttemptResult) -> bool:
+        """Tabla de retry de voz (ENLIL_TEST01B_AUDITORIA_DISENO_V3.md §4/§5,
+        V5 sin cambios). Nunca se reintenta timeout/error/circuit_open/filtered/
+        unknown — solo empty+length, empty+stop(sin refusal), y truncated."""
+        if attempt.state == "truncated":
+            return attempt.finish_reason == "length"
+        if attempt.state == "empty":
+            return attempt.finish_reason in ("length", "stop")
+        return False
+
+    async def _consult_god_with_retry(
         self, name: str, query: str, context: str, system_extra: str = "",
         max_tokens: int = 1024, doc_id: Optional[str] = None, original_context: str = "",
-        timeout_override: float | None = None,
+        timeout_override: float | None = None, deadline: float = None,
     ) -> GodResponse:
+        """Sustituye a _consult_god_safe(). Máximo 2 intentos totales
+        (V3 §4, V4/V5/V6 sin cambios), con deadline global obligatorio
+        (V4 §2 — ningún presupuesto propio, el parámetro `deadline` es
+        requerido) y selección por clases (V5 §2/V6 §confirmación)."""
+        assert deadline is not None, "_consult_god_with_retry requiere un deadline explícito (V4 §2)"
+        god = self.pantheon[name]
+        model = self._resolve_model(god.model)
+        god_timeout = timeout_override if timeout_override is not None else GOD_TIMEOUTS.get(name, 45.0)
+
+        attempt1 = await self._attempt_or_fallback(
+            name, query, context, system_extra, max_tokens, doc_id, original_context,
+            god_timeout, model, attempt_number=1,
+        )
+
+        attempt2 = None
+        if self._retry_eligible(attempt1):
+            remaining = deadline - time.monotonic()
+            if remaining > god_timeout:
+                retry_max_tokens = min(int(max_tokens * 1.5), 8000)
+                retry_timeout = min(god_timeout, max(0.0, remaining))
+                attempt2 = await self._attempt_or_fallback(
+                    name, query, context, system_extra, retry_max_tokens, doc_id, original_context,
+                    retry_timeout, model, attempt_number=2,
+                )
+            # si no queda tiempo suficiente, NO se lanza el segundo intento (V4 §2/§4)
+
+        operative = select_operative_attempt(attempt1, attempt2)
+        attempts = [attempt1] + ([attempt2] if attempt2 is not None else [])
+        dissent = operative.state if operative.state in ("timeout", "error", "circuit_open") else None
+        return GodResponse(
+            god_name=name,
+            model=operative.requested_model,
+            content=operative.content,
+            tokens_used=operative.total_tokens if operative.total_tokens is not None else 0,
+            latency_ms=operative.latency_ms,
+            dissent=dissent,
+            voice_status=operative.state,
+            finish_reason=operative.finish_reason,
+            retry_count=1 if attempt2 is not None else 0,
+            returned_model=operative.returned_model,
+            reasoning_tokens=operative.reasoning_tokens,
+            usage_state=operative.usage_state,
+            attempts=attempts,
+        )
+
+    async def _attempt_or_fallback(
+        self, name, query, context, system_extra, max_tokens, doc_id, original_context,
+        timeout, model, attempt_number,
+    ) -> AttemptResult:
+        """Un intento (1 o 2), capturando timeout/error como AttemptResult
+        clasificado — nunca se persiste la excepción cruda (V4 §6)."""
         try:
-            god_timeout = timeout_override if timeout_override is not None else GOD_TIMEOUTS.get(name, 45.0)
             return await self.consult_god(
                 name, query, context,
-                system_extra=system_extra,
-                max_tokens=max_tokens,
-                timeout=god_timeout,
-                doc_id=doc_id,
-                original_context=original_context,
+                system_extra=system_extra, max_tokens=max_tokens, timeout=timeout,
+                doc_id=doc_id, original_context=original_context, attempt_number=attempt_number,
             )
         except asyncio.TimeoutError:
-            god = self.pantheon[name]
-            model = self._resolve_model(god.model)
-            god_timeout = timeout_override if timeout_override is not None else GOD_TIMEOUTS.get(name, 45.0)
-            return GodResponse(
-                god_name=name,
-                model=model,
-                content=f"[TIMEOUT]: {name} no respondio en {god_timeout:.0f}s",
-                tokens_used=0,
-                latency_ms=god_timeout * 1000,
-                dissent="timeout",
+            return AttemptResult(
+                attempt_number=attempt_number,
+                state=classify_attempt(AttemptSignal(timed_out=True)),
+                content="", requested_model=model, max_tokens_budget=max_tokens,
+                latency_ms=timeout * 1000, usage_state="unknown",
+                exception_type="TimeoutError",
             )
         except Exception as exc:
-            god = self.pantheon[name]
-            model = self._resolve_model(god.model)
-            return GodResponse(
-                god_name=name,
-                model=model,
-                content=f"[ERROR {type(exc).__name__}]: {exc}",
-                tokens_used=0,
-                latency_ms=0.0,
-                dissent="error",
+            status = getattr(exc, "status_code", None) or getattr(
+                getattr(exc, "response", None), "status_code", None
+            )
+            return AttemptResult(
+                attempt_number=attempt_number,
+                state=classify_attempt(AttemptSignal(exception=exc)),
+                content="", requested_model=model, max_tokens_budget=max_tokens,
+                latency_ms=0.0, usage_state="unknown",
+                exception_type=type(exc).__name__,
+                error_code=str(status) if status else None,
             )
 
     async def convene(
@@ -567,7 +661,9 @@ class Council:
         max_tokens: int = 2048,
         doc_id: Optional[str] = None,
         global_system_extra: str = "",
+        deadline: float = None,
     ) -> list[GodResponse]:
+        assert deadline is not None, "convene() requiere un deadline explícito (V4 §2) — no se calcula aquí"
         overrides = god_overrides or {}
 
         # El Lector: para documentos grandes genera digest antes de invocar los dioses
@@ -585,43 +681,107 @@ class Council:
             god_context = context
             original_context = ""
 
-        tasks = [
-            self._consult_god_safe(
+        valid_names = [n for n in god_names if n in self.pantheon]
+        tasks = {
+            name: asyncio.create_task(self._consult_god_with_retry(
                 name, query, god_context,
                 doc_id=doc_id,
                 original_context=original_context,
                 system_extra=_merge_system_extra(global_system_extra, overrides.get(name, {}).get("system_extra", "")),
                 max_tokens=max_tokens,
+                deadline=deadline,
+            ))
+            for name in valid_names
+        }
+        try:
+            remaining = max(0.0, deadline - time.monotonic())
+            done, pending = await asyncio.wait(tasks.values(), timeout=remaining)
+            results = []
+            for name, t in tasks.items():
+                if t in done:
+                    results.append(t.result())
+                else:
+                    god = self.pantheon[name]
+                    results.append(GodResponse(
+                        god_name=name,
+                        model=self._resolve_model(god.model),
+                        content=f"[TIMEOUT]: {name} no respondio dentro del deadline global",
+                        tokens_used=0,
+                        latency_ms=remaining * 1000,
+                        dissent="timeout",
+                        voice_status="timeout",
+                    ))
+            return results
+        finally:
+            # V5 §5 — cancelación real en CUALQUIER salida del try (deadline
+            # interno, excepción inesperada, o CancelledError externa —
+            # p.ej. el asyncio.wait_for(...) de /task). Un `finally` se
+            # ejecuta también cuando lo que lo atraviesa es una cancelación;
+            # el `await asyncio.wait(...)` de arriba NO lo hacía antes.
+            still_pending = [t for t in tasks.values() if not t.done()]
+            for t in still_pending:
+                t.cancel()
+            if still_pending:
+                await asyncio.gather(*still_pending, return_exceptions=True)
+
+    async def _synthesis_attempt_once(
+        self, client, model, prompt, system_extra, *, max_tokens, timeout, attempt_number,
+    ) -> SynthesisAttempt:
+        """Un único intento de síntesis, clasificado con la MISMA
+        classify_attempt() que las voces (V3 §2, única fuente de verdad).
+        Nunca persiste la excepción cruda (V4 §6) — solo exception_type/
+        error_code saneados."""
+        import openai as _oai
+        t0 = time.monotonic()
+        try:
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": _SYNTHESIS_SYSTEM + (chr(10) + system_extra if system_extra else "")},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=max_tokens,
+                ),
+                timeout=timeout,
             )
-            for name in god_names
-            if name in self.pantheon
-        ]
-        actual_tasks = [asyncio.create_task(coro) for coro in tasks]
-        valid_names = [n for n in god_names if n in self.pantheon]
-        # El limite global debe cubrir al dios mas lento configurado (p.ej. Nabu a 400s
-        # con modelos de razonamiento extendido) — un tope fijo mas corto los cancelaba
-        # aunque su propio GOD_TIMEOUTS individual no se hubiera agotado.
-        max_god_timeout = max((GOD_TIMEOUTS.get(n, 45.0) for n in valid_names), default=90.0)
-        convene_timeout = max_god_timeout + 30.0
-        done, pending = await asyncio.wait(actual_tasks, timeout=convene_timeout)
-        for t in pending:
-            t.cancel()
-        results = []
-        for i, t in enumerate(actual_tasks):
-            if t in done:
-                results.append(t.result())
-            else:
-                name = valid_names[i]
-                god = self.pantheon[name]
-                results.append(GodResponse(
-                    god_name=name,
-                    model=self._resolve_model(god.model),
-                    content=f"[TIMEOUT]: {name} no respondio en {convene_timeout:.0f}s",
-                    tokens_used=0,
-                    latency_ms=convene_timeout * 1000,
-                    dissent="timeout",
-                ))
-        return results
+        except _oai.APIStatusError as err:
+            status = getattr(err, "status_code", None)
+            return SynthesisAttempt(
+                attempt_number=attempt_number, content="", state="error",
+                requested_model=model, max_tokens_budget=max_tokens,
+                latency_ms=round((time.monotonic() - t0) * 1000, 1), usage_state="unknown",
+                exception_type=type(err).__name__, error_code=str(status) if status else None,
+            )
+        except asyncio.TimeoutError:
+            return SynthesisAttempt(
+                attempt_number=attempt_number, content="", state="timeout",
+                requested_model=model, max_tokens_budget=max_tokens,
+                latency_ms=timeout * 1000, usage_state="unknown", exception_type="TimeoutError",
+            )
+        except Exception as exc:
+            return SynthesisAttempt(
+                attempt_number=attempt_number, content="", state="error",
+                requested_model=model, max_tokens_budget=max_tokens,
+                latency_ms=round((time.monotonic() - t0) * 1000, 1), usage_state="unknown",
+                exception_type=type(exc).__name__,
+            )
+
+        latency = (time.monotonic() - t0) * 1000
+        content = _strip_analisis(resp.choices[0].message.content or "")
+        finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        has_refusal = bool(getattr(resp.choices[0].message, "refusal", None))
+        usage_state, usage_fields = classify_usage(resp.usage)
+        signal = AttemptSignal(finish_reason=finish_reason, content=content, has_refusal=has_refusal)
+        return SynthesisAttempt(
+            attempt_number=attempt_number, content=content, state=classify_attempt(signal),
+            requested_model=model, returned_model=getattr(resp, "model", None),
+            finish_reason=finish_reason,
+            prompt_tokens=usage_fields["prompt_tokens"], completion_tokens=usage_fields["completion_tokens"],
+            reasoning_tokens=usage_fields["reasoning_tokens"], total_tokens=usage_fields["total_tokens"],
+            usage_state=usage_state, max_tokens_budget=max_tokens, latency_ms=round(latency, 1),
+            generation_id=getattr(resp, "id", None),
+        )
 
     async def synthesize(
         self,
@@ -630,20 +790,34 @@ class Council:
         budget_tier: str = "standard",
         system_extra: str = "",
         peer_critiques: list | None = None,
-    ) -> str:
-        successful = [r for r in responses if r.content and not r.dissent]
+        deadline: float = None,
+    ) -> tuple[str, list[SynthesisAttempt]]:
+        """Devuelve (contenido_operativo, lista_de_intentos) — máximo 2
+        intentos totales, 402 incluido dentro de ese máximo (V4 §4/§5,
+        V6 sin cambios). Deja de propagar excepciones de la API (cambio
+        deliberado de comportamiento respecto a la versión pre-TEST01B):
+        un fallo de síntesis ahora se clasifica y se refleja en
+        Decree.status='failed', nunca tumba la petición completa con un
+        500 no controlado."""
+        assert deadline is not None, "synthesize() requiere un deadline explícito (V4 §2)"
+        successful = [r for r in responses if r.voice_status in USABLE_STATES]
         if not successful:
             failed = [r.god_name for r in responses]
-            return (
+            content = (
                 f"⚠ El Consejo no pudo reunirse. Todos los dioses fallaron: {', '.join(failed)}. "
                 "Revisa la conectividad con OpenRouter o los limites de tasa de los modelos."
             )
+            attempt = SynthesisAttempt(
+                attempt_number=1, content=content, state="error",
+                requested_model="", max_tokens_budget=0, latency_ms=0.0, usage_state="unknown",
+            )
+            return content, [attempt]
 
         voices = "\n\n".join(
             f"[{r.god_name.upper()}]: {r.content}" for r in successful
         )
         if len(successful) < len(responses):
-            failed_names = [f"{r.god_name}({r.dissent})" for r in responses if r.dissent]
+            failed_names = [f"{r.god_name}({r.voice_status})" for r in responses if r.voice_status not in USABLE_STATES]
             voices += f"\n\n[NOTA: Los siguientes dioses no respondieron: {', '.join(failed_names)}]"
 
         if peer_critiques:
@@ -656,7 +830,6 @@ class Council:
         synthesis_prompt = _build_synthesis_prompt(query, voices)
 
         synthesis_client = self._anthropic_client or self._client
-        convened_gods = {r.god_name for r in responses}
         # Opus SIEMPRE — calidad del veredicto es el diferenciador, no el tier
         use_opus = self._anthropic_client is not None
         synthesis_model = (
@@ -665,38 +838,51 @@ class Council:
             else self._resolve_model("anthropic/claude-sonnet-5")
         )
         if self._synthesis_circuit.is_open():
-            return (
+            content = (
                 "⚠ La sintesis no esta disponible temporalmente (API degradada). "
                 "Las voces del Consejo estan en el campo 'voices'. "
                 "Reintenta en 60 segundos."
             )
+            attempt = SynthesisAttempt(
+                attempt_number=1, content=content, state="circuit_open",
+                requested_model=synthesis_model, max_tokens_budget=0,
+                latency_ms=0.0, usage_state="unknown",
+            )
+            return content, [attempt]
 
-        import openai as _oai
-        for _max_tok in (6000, 3000, 1500):
-            try:
-                resp = await asyncio.wait_for(
-                    synthesis_client.chat.completions.create(
-                        model=synthesis_model,
-                        messages=[
-                            {"role": "system", "content": _SYNTHESIS_SYSTEM + (chr(10) + system_extra if system_extra else "")},
-                            {"role": "user", "content": synthesis_prompt},
-                        ],
-                        max_tokens=_max_tok,
-                    ),
-                    timeout=240.0,
+        attempt1 = await self._synthesis_attempt_once(
+            synthesis_client, synthesis_model, synthesis_prompt, system_extra,
+            max_tokens=6000, timeout=240.0, attempt_number=1,
+        )
+        attempts = [attempt1]
+
+        attempt2 = None
+        remaining = deadline - time.monotonic()
+        if attempt1.error_code == "402":
+            # 402 -- exclusivamente condición recuperable de síntesis, nunca
+            # regla general de retry (V3 §3.1). Presupuesto menor.
+            if remaining > 0:
+                attempt2 = await self._synthesis_attempt_once(
+                    synthesis_client, synthesis_model, synthesis_prompt, system_extra,
+                    max_tokens=3000, timeout=min(240.0, max(0.0, remaining)), attempt_number=2,
                 )
-                self._synthesis_circuit.record_success()
-                content = resp.choices[0].message.content or ""
-                return _strip_analisis(content)
-            except _oai.APIStatusError as _err:
-                if _err.status_code == 402 and _max_tok > 800:
-                    continue
-                self._synthesis_circuit.record_failure()
-                raise
-            except (asyncio.TimeoutError, Exception) as _exc:
-                self._synthesis_circuit.record_failure()
-                raise
-        raise RuntimeError("Sintesis agoto los reintentos de presupuesto sin exito ni excepcion")
+        elif self._retry_eligible(attempt1):
+            if remaining > 0:
+                retry_max = min(9000, int(6000 * 1.5))
+                attempt2 = await self._synthesis_attempt_once(
+                    synthesis_client, synthesis_model, synthesis_prompt, system_extra,
+                    max_tokens=retry_max, timeout=min(240.0, max(0.0, remaining)), attempt_number=2,
+                )
+        if attempt2 is not None:
+            attempts.append(attempt2)
+
+        operative = select_operative_attempt(attempt1, attempt2)
+        if operative.state in USABLE_STATES:
+            self._synthesis_circuit.record_success()
+        else:
+            self._synthesis_circuit.record_failure()
+
+        return operative.content, attempts
 
     async def convene_stream(
         self,
@@ -707,8 +893,13 @@ class Council:
         max_tokens: int = 2048,
         doc_id: Optional[str] = None,
         timeout_override: float | None = None,
+        deadline: float = None,
     ) -> AsyncIterator[GodResponse]:
-        """Yield de cada GodResponse cuando termina, en orden de llegada."""
+        """Yield de cada GodResponse cuando termina, en orden de llegada.
+        Usa _consult_god_with_retry() -- misma clasificación/retry/deadline
+        que la ruta no-streaming (V5 §5/V6 -- una sola fuente de verdad
+        compartida entre /query y /query/stream)."""
+        assert deadline is not None, "convene_stream() requiere un deadline explícito (V4 §2)"
         overrides = god_overrides or {}
         valid_names = [n for n in god_names if n in self.pantheon]
         result_queue: asyncio.Queue[GodResponse] = asyncio.Queue()
@@ -728,45 +919,24 @@ class Council:
 
         async def run_and_enqueue(name):
             extra = overrides.get(name, {}).get("system_extra", "")
-            resp = await self._consult_god_safe(
+            resp = await self._consult_god_with_retry(
                 name, query, god_context,
                 system_extra=extra, max_tokens=max_tokens, doc_id=doc_id,
                 original_context=original_context,
                 timeout_override=timeout_override,
+                deadline=deadline,
             )
             await result_queue.put(resp)
 
         tasks = [asyncio.create_task(run_and_enqueue(n)) for n in valid_names]
-        received = 0
-        total = len(valid_names)
-        from .gods.registry import GOD_TIMEOUTS
-        max_god_timeout = max((GOD_TIMEOUTS.get(n, 60.0) for n in valid_names), default=90.0)
-        if timeout_override is not None:
-            max_god_timeout = timeout_override
-        _start = asyncio.get_event_loop().time()
-        deadline = _start + max_god_timeout + 30.0
-        while received < total:
-            now = asyncio.get_event_loop().time()
-            remaining = deadline - now
-            if remaining <= 0:
-                # Drenar cola antes de salir — evita el dios fantasma
-                while not result_queue.empty():
-                    try:
-                        resp = result_queue.get_nowait()
-                        received += 1
-                        yield resp
-                    except Exception:
-                        break
-                break
-            # Poll en trozos de 5s para evitar race condition
-            poll = min(remaining, 5.0)
-            try:
-                resp = await asyncio.wait_for(result_queue.get(), timeout=poll)
-                received += 1
-                yield resp
-            except asyncio.TimeoutError:
-                # Si todas las tareas terminaron, drenar y salir
-                if all(t.done() for t in tasks):
+        try:
+            received = 0
+            total = len(valid_names)
+            while received < total:
+                now = time.monotonic()
+                remaining = deadline - now
+                if remaining <= 0:
+                    # Drenar cola antes de salir — evita el dios fantasma
                     while not result_queue.empty():
                         try:
                             resp = result_queue.get_nowait()
@@ -775,9 +945,33 @@ class Council:
                         except Exception:
                             break
                     break
-        for t in tasks:
-            if not t.done():
+                # Poll en trozos cortos para evitar race condition
+                poll = min(remaining, 5.0)
+                try:
+                    resp = await asyncio.wait_for(result_queue.get(), timeout=poll)
+                    received += 1
+                    yield resp
+                except asyncio.TimeoutError:
+                    # Si todas las tareas terminaron, drenar y salir
+                    if all(t.done() for t in tasks):
+                        while not result_queue.empty():
+                            try:
+                                resp = result_queue.get_nowait()
+                                received += 1
+                                yield resp
+                            except Exception:
+                                break
+                        break
+        finally:
+            # V5 §5 -- cubre deadline interno, desconexión SSE (GeneratorExit
+            # al dejar de consumirse este generador) y cualquier cancelación
+            # externa. Ningún resultado tardío se incorpora: el bucle de
+            # arriba solo yieldea lo que ya estaba en la cola antes de salir.
+            still_pending = [t for t in tasks if not t.done()]
+            for t in still_pending:
                 t.cancel()
+            if still_pending:
+                await asyncio.gather(*still_pending, return_exceptions=True)
 
     async def synthesize_stream(
         self,
@@ -785,25 +979,37 @@ class Council:
         query: str,
         budget_tier: str = "standard",
         peer_critiques: list | None = None,
-    ) -> AsyncIterator[str]:
-        """Yield de cada chunk de texto de la sintesis en streaming."""
-        successful = [r for r in responses if r.content and not r.dissent]
+        deadline: float = None,
+    ) -> AsyncIterator[str | SynthesisAttempt]:
+        """Yield de cada chunk de texto (str) y, como ÚLTIMO elemento,
+        un SynthesisAttempt terminal estructurado (V5 §6.1) -- el llamador
+        debe distinguir por tipo. Regla dura: una vez emitido el primer
+        chunk, CERO reintento -- por eso este método nunca reintenta,
+        a diferencia de synthesize() (no-streaming) que sí puede hacer un
+        segundo intento completo ANTES de emitir nada."""
+        assert deadline is not None, "synthesize_stream() requiere un deadline explícito (V4 §2)"
+        t0 = time.monotonic()
+        successful = [r for r in responses if r.voice_status in USABLE_STATES]
         if not successful:
             failed = [r.god_name for r in responses]
-            yield "El Consejo no pudo reunirse. Dioses fallados: " + ", ".join(failed)
+            content = "El Consejo no pudo reunirse. Dioses fallados: " + ", ".join(failed)
+            yield content
+            yield SynthesisAttempt(
+                attempt_number=1, content=content, state="error",
+                requested_model="", max_tokens_budget=0, latency_ms=0.0, usage_state="unknown",
+            )
             return
 
         voices = "\n\n".join(
             "[" + r.god_name.upper() + "]: " + r.content for r in successful
         )
         if len(successful) < len(responses):
-            failed_names = [r.god_name + "(" + (r.dissent or "") + ")" for r in responses if r.dissent]
+            failed_names = [r.god_name + "(" + r.voice_status + ")" for r in responses if r.voice_status not in USABLE_STATES]
             voices += "\n\n[NOTA: No respondieron: " + ", ".join(failed_names) + "]"
 
         synthesis_prompt = _build_synthesis_prompt(query, voices)
 
         synthesis_client = self._anthropic_client or self._client
-        convened_gods = {r.god_name for r in responses}
         # Opus SIEMPRE — calidad del veredicto es el diferenciador, no el tier
         use_opus = self._anthropic_client is not None
         synthesis_model = (
@@ -811,30 +1017,81 @@ class Council:
             else self._resolve_model("anthropic/claude-sonnet-5")
         )
 
-        stream = await synthesis_client.chat.completions.create(
-            model=synthesis_model,
-            messages=[
-                {"role": "system", "content": _SYNTHESIS_SYSTEM},
-                {"role": "user", "content": synthesis_prompt},
-            ],
-            max_tokens=6000,
-            stream=True,
-        )
+        remaining = max(1.0, deadline - time.monotonic())
+        stream_timeout = min(300.0, remaining)
+        collected = []
+        finish_reason = None
+        usage_obj = None
+        resp_model = None
+        resp_id = None
+        timed_out = False
         try:
-            async with asyncio.timeout(300):
+            stream = await synthesis_client.chat.completions.create(
+                model=synthesis_model,
+                messages=[
+                    {"role": "system", "content": _SYNTHESIS_SYSTEM},
+                    {"role": "user", "content": synthesis_prompt},
+                ],
+                max_tokens=6000,
+                stream=True,
+            )
+            async with asyncio.timeout(stream_timeout):
                 async for chunk in stream:
-                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    resp_id = resp_id or getattr(chunk, "id", None)
+                    resp_model = resp_model or getattr(chunk, "model", None)
+                    if getattr(chunk, "usage", None) is not None:
+                        usage_obj = chunk.usage
+                    if not chunk.choices:
+                        continue
+                    fr = getattr(chunk.choices[0], "finish_reason", None)
+                    if fr:
+                        finish_reason = fr
+                    delta = chunk.choices[0].delta.content if chunk.choices[0].delta else None
                     if delta:
+                        collected.append(delta)
                         yield delta
         except asyncio.TimeoutError:
+            timed_out = True
             yield "\n\n[Sintesis: tiempo agotado. Decreto parcial emitido.]"
+        except Exception as exc:
+            content = "".join(collected)
+            yield SynthesisAttempt(
+                attempt_number=1, content=content, state="error",
+                requested_model=synthesis_model, max_tokens_budget=6000,
+                latency_ms=round((time.monotonic() - t0) * 1000, 1), usage_state="unknown",
+                exception_type=type(exc).__name__,
+            )
+            return
+
+        content = _strip_analisis("".join(collected))
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        if timed_out:
+            state = "truncated" if content.strip() else "timeout"
+            usage_state, usage_fields = "unknown", {"prompt_tokens": None, "completion_tokens": None,
+                                                       "reasoning_tokens": None, "total_tokens": None}
+        else:
+            usage_state, usage_fields = classify_usage(usage_obj)
+            signal = AttemptSignal(finish_reason=finish_reason, content=content)
+            state = classify_attempt(signal)
+        yield SynthesisAttempt(
+            attempt_number=1, content=content, state=state,
+            requested_model=synthesis_model, returned_model=resp_model,
+            finish_reason=finish_reason,
+            prompt_tokens=usage_fields["prompt_tokens"], completion_tokens=usage_fields["completion_tokens"],
+            reasoning_tokens=usage_fields["reasoning_tokens"], total_tokens=usage_fields["total_tokens"],
+            usage_state=usage_state, max_tokens_budget=6000, latency_ms=latency_ms,
+            generation_id=resp_id,
+        )
 
 
 
-    async def peer_review_stream(self, original_responses, original_query: str):
+    async def peer_review_stream(self, original_responses, original_query: str, deadline: float = None):
         """Cada dios revisa anonimamente las voces del resto desde su dominio.
-        Yield PeerCritique en orden de llegada (paralelo).
-        """
+        Yield PeerCritique en orden de llegada (paralelo). `deadline` es
+        opcional por compatibilidad con llamadores que aún no lo pasan
+        (V4 §2 exige que comparta el deadline global cuando el llamador
+        lo tenga disponible; internamente se usa como techo del timeout
+        por dios si se proporciona)."""
         anon_block = "\n\n".join(
             f"--- Respuesta {i + 1} ---\n{r.content}"
             for i, r in enumerate(original_responses)
@@ -861,6 +1118,9 @@ class Council:
                 "PROHIBIDO: repetir el contenido de las respuestas. Solo analisis critico directo."
             )
             t0 = time.time()
+            per_god_timeout = 35.0
+            if deadline is not None:
+                per_god_timeout = max(0.1, min(35.0, deadline - time.monotonic()))
             try:
                 resp = await asyncio.wait_for(
                     self.consult_god(
@@ -870,12 +1130,15 @@ class Council:
                         system_extra=system_extra,
                         max_tokens=400,
                     ),
-                    timeout=35.0,
+                    timeout=per_god_timeout,
                 )
+                # consult_god() devuelve un AttemptResult (TEST 01B) — un único
+                # intento, sin retry, es suficiente para la revisión de pares
+                # (fuera de alcance del máximo de 2 intentos de voces/síntesis).
                 await queue.put(PeerCritique(
                     god_name=god_name,
                     content=resp.content,
-                    tokens_used=resp.tokens_used,
+                    tokens_used=resp.total_tokens if resp.total_tokens is not None else 0,
                     latency_ms=resp.latency_ms,
                 ))
             except Exception as exc:
@@ -888,11 +1151,18 @@ class Council:
                 ))
 
         tasks = [asyncio.create_task(_review_one(g)) for g in god_names]
-        for _ in range(len(god_names)):
-            item = await queue.get()
-            if item is not None:
-                yield item
-        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            for _ in range(len(god_names)):
+                item = await queue.get()
+                if item is not None:
+                    yield item
+        finally:
+            # V5 §5 -- desconexión/cancelación durante peer review también
+            # cancela y recoge, no solo el camino feliz.
+            still_pending = [t for t in tasks if not t.done()]
+            for t in still_pending:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def circuit_state(self) -> dict:
         return self._circuit.status()

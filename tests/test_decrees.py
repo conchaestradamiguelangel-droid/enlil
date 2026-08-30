@@ -20,6 +20,8 @@ def make_decree(**kwargs) -> Decree:
         synthesis="Sintesis del Consejo.",
         total_tokens=220,
         budget_tier="standard",
+        status="complete",
+        signature_payload_version=2,
     )
     defaults.update(kwargs)
     return Decree(**defaults)

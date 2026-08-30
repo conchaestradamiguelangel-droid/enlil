@@ -231,6 +231,12 @@ async def run_query(req: QueryRequest, client: dict = Depends(require_auth)):
         "dissenting_gods": decree.dissenting_gods(),
         "pq_signed": bool(decree.pq_signature),
         "predicted_scores": getattr(decree, "predicted_scores", {}),
+        # --- campos nuevos TEST 01B (aditivos, ninguna clave existente se toca) ---
+        "status": decree.status,
+        "accounting_state": decree.accounting_state,
+        "known_token_subtotal": decree.known_token_subtotal,
+        "observed_total_tokens": decree.observed_total_tokens,
+        "wall_clock_ms": decree.wall_clock_ms,
         "voices": [
             {
                 "god": v.god_name,
@@ -238,6 +244,9 @@ async def run_query(req: QueryRequest, client: dict = Depends(require_auth)):
                 "tokens": v.tokens_used,
                 "latency_ms": v.latency_ms,
                 "dissent": v.dissent,
+                "voice_status": v.voice_status,
+                "finish_reason": v.finish_reason,
+                "retry_count": v.retry_count,
             }
             for v in decree.voices
         ],
@@ -256,126 +265,44 @@ async def run_query(req: QueryRequest, client: dict = Depends(require_auth)):
     ),
 )
 async def run_query_stream(req: QueryRequest, client: dict = Depends(require_auth)):
+    """Delegado mínimo sobre Orchestrator.query_stream() (V5/V6 §6 --
+    implementación canónica única). No hay lógica de negocio propia aquí
+    -- solo transporte HTTP/SSE, rate limit y usage logging (que
+    permanece en la capa API porque depende de client_id/billing, ajeno
+    a Orchestrator). Se fuerza COMPATIBILITY_PROFILE explícitamente:
+    reproduce EXACTAMENTE los efectos y el contrato SSE que esta ruta
+    ya tenía en producción antes de TEST 01B."""
     _rate_check(client["id"])
     import json as _json
+    from enlil.reliability import COMPATIBILITY_PROFILE
     orch = _get_enlil()
+    context = _truncate_context(req.context)
 
     async def event_stream():
-        from enlil.router import classify_query, select_gods
-        from enlil.budget import resolve_budget, estimate_cost
-        from enlil.verticals.legal import LEGAL_GOD_OVERRIDES
-        from enlil.verticals.cybersecurity import CYBER_GOD_OVERRIDES
-
-        text = req.query
-        context = _truncate_context(req.context)
-        domains = classify_query(text)
-        # Sistema de Voces: voices_count tiene prioridad sobre budget_tier
-        _vc = getattr(req, "voices_count", None)
-        _tier = req.budget_tier
-        if _vc == 2:
-            _tier = "minimal"
-        elif _vc == 4:
-            _tier = "standard"
-        elif _vc == 9:
-            _tier = "full"
-        budget = resolve_budget(text, _tier)
-        god_names = select_gods(domains, orch.pantheon, budget.tier)
-
-        # Aislada por client_id (fix P0 2026-08-29, hallazgo propio no
-        # citado por Codex: /query/stream construye su Decree inline en
-        # vez de pasar por Orchestrator.query(), y tenía la misma fuga).
-        if orch.qdrant.is_available:
-            mem = orch.qdrant.search(text, limit=3, client_id=client["id"])
-        else:
-            mem = orch.memory.search(text, limit=3, client_id=client["id"])
-        if mem:
-            context = context + "\n\nDecretos anteriores relevantes:\n" + mem
-
-        domain_set = set(domains)
-        if "legal" in domain_set:
-            god_overrides = LEGAL_GOD_OVERRIDES
-        elif "security" in domain_set:
-            god_overrides = CYBER_GOD_OVERRIDES
-        else:
-            god_overrides = None
-
-        responses = []
-        _max_tok_god = 3000 if budget.tier == "full" else 2048
-        async for god_resp in orch.council.convene_stream(
-            god_names, text, context, god_overrides=god_overrides,
-            max_tokens=_max_tok_god, timeout_override=req.timeout_override,
+        decree_id_seen = ""
+        total_tokens_seen = 0
+        gods_seen: list[str] = []
+        async for raw in orch.query_stream(
+            req.query, context, req.budget_tier, req.parent_decree_id,
+            client_id=client["id"],
+            voices_count=getattr(req, "voices_count", None),
+            timeout_override=req.timeout_override,
+            peer_review=req.peer_review,
+            profile=COMPATIBILITY_PROFILE,
         ):
-            responses.append(god_resp)
-            event = {
-                "type": "god",
-                "god": god_resp.god_name,
-                "content": god_resp.content,
-                "tokens": god_resp.tokens_used,
-                "latency_ms": god_resp.latency_ms,
-                "dissent": god_resp.dissent,
-            }
-            yield "data: " + _json.dumps(event, ensure_ascii=False) + "\n\n"
-
-        # Fase 2: Peer review (si se solicito)
-        peer_critiques = []
-        if req.peer_review and responses:
-            yield "data: " + _json.dumps({"type": "peer_review_init", "reviewers": [r.god_name for r in responses], "total": len(responses)}, ensure_ascii=False) + "\n\n"
-            async for critique in orch.council.peer_review_stream(responses, text):
-                peer_critiques.append(critique)
-                yield "data: " + _json.dumps({
-                    "type": "peer_critique",
-                    "god": critique.god_name,
-                    "content": critique.content,
-                    "tokens": critique.tokens_used,
-                    "latency_ms": critique.latency_ms,
-                }, ensure_ascii=False) + "\n\n"
-
-        synthesis_chunks = []
-        async for token in orch.council.synthesize_stream(
-            responses, text, budget_tier=budget.tier,
-            peer_critiques=peer_critiques if peer_critiques else None,
-        ):
-            synthesis_chunks.append(token)
-            yield "data: " + _json.dumps({"type": "synthesis_token", "token": token}, ensure_ascii=False) + "\n\n"
-
-        full_synthesis = "".join(synthesis_chunks)
-
-        from enlil.decrees.decree import Decree, GodVoice
-        voices_obj = [
-            GodVoice(
-                god_name=r.god_name, model=r.model, content=r.content,
-                tokens_used=r.tokens_used, latency_ms=r.latency_ms, dissent=r.dissent,
-            ) for r in responses
-        ]
-        decree = Decree(
-            query=text, domains=domains, synthesis=full_synthesis,
-            voices=voices_obj, budget_tier=budget.tier,
-            gods_convened=[r.god_name for r in responses],
-            total_tokens=sum(r.tokens_used for r in responses),
-        )
-        orch.store.save(decree, client_id=client["id"])
-        if orch.qdrant.is_available:
-            orch.qdrant.store(decree)
-
-        total_tokens = sum(r.tokens_used for r in responses)
+            parsed = _json.loads(raw)
+            if parsed.get("type") == "done":
+                decree_id_seen = parsed.get("decree_id", "")
+                total_tokens_seen = parsed.get("total_tokens", 0)
+                gods_seen = parsed.get("gods_convened", [])
+            yield "data: " + raw + "\n\n"
+        # usage logging -- permanece en la capa API (billing/client_id), en
+        # ambos perfiles, exactamente igual que hoy (V6 §5 fila 22).
         log_usage(
-            client_id=client["id"], decree_id=decree.id, tokens=total_tokens,
-            budget_tier=budget.tier, gods_count=len(god_names),
-            query_preview=text,
+            client_id=client["id"], decree_id=decree_id_seen, tokens=total_tokens_seen,
+            budget_tier=req.budget_tier or "standard", gods_count=len(gods_seen),
+            query_preview=req.query,
         )
-
-        done_event = {
-            "type": "done",
-            "decree_id": decree.id,
-            "pq_signed": bool(getattr(decree, "pq_signature", None)),
-            "total_tokens": total_tokens,
-            "gods_convened": [r.god_name for r in responses],
-            "peer_review": [
-                {"god": c.god_name, "content": c.content, "tokens": c.tokens_used}
-                for c in peer_critiques
-            ],
-        }
-        yield "data: " + _json.dumps(done_event, ensure_ascii=False) + "\n\n"
 
     return StreamingResponse(
         event_stream(),

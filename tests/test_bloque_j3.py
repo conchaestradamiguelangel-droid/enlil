@@ -210,7 +210,10 @@ class TestSynthesizeInjectsDirectiveIntoMessages:
 
     def _run(self, council, responses, query, system_extra):
         import asyncio
-        return asyncio.run(council.synthesize(responses, query, system_extra=system_extra))
+        import time
+        return asyncio.run(council.synthesize(
+            responses, query, system_extra=system_extra, deadline=time.monotonic() + 300.0,
+        ))
 
     def _responses(self):
         from enlil.gods.base import GodResponse
