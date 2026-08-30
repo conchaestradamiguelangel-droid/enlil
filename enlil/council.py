@@ -583,15 +583,17 @@ class Council:
         return False
 
     async def _consult_god_with_retry(
-        self, name: str, query: str, context: str, system_extra: str = "",
+        self, name: str, query: str, context: str, *, deadline: float,
+        system_extra: str = "",
         max_tokens: int = 1024, doc_id: Optional[str] = None, original_context: str = "",
-        timeout_override: float | None = None, deadline: float = None,
+        timeout_override: float | None = None,
     ) -> GodResponse:
         """Sustituye a _consult_god_safe(). Máximo 2 intentos totales
-        (V3 §4, V4/V5/V6 sin cambios), con deadline global obligatorio
-        (V4 §2 — ningún presupuesto propio, el parámetro `deadline` es
-        requerido) y selección por clases (V5 §2/V6 §confirmación)."""
-        assert deadline is not None, "_consult_god_with_retry requiere un deadline explícito (V4 §2)"
+        (V3 §4, V4/V5/V6 sin cambios), con deadline global OBLIGATORIO
+        (V4 §2 / corrección delta-2: parámetro keyword-only sin default,
+        no un `assert` en tiempo de ejecución -- un assert desaparece con
+        `python -O` y dejaría de proteger nada; aquí Python simplemente
+        no permite llamar a esta función sin `deadline`)."""
         god = self.pantheon[name]
         model = self._resolve_model(god.model)
         god_timeout = timeout_override if timeout_override is not None else GOD_TIMEOUTS.get(name, 45.0)
@@ -682,13 +684,15 @@ class Council:
         god_names: list[str],
         query: str,
         context: str = "",
+        *,
+        deadline: float,
         god_overrides: Optional[dict] = None,
         max_tokens: int = 2048,
         doc_id: Optional[str] = None,
         global_system_extra: str = "",
-        deadline: float = None,
     ) -> list[GodResponse]:
-        assert deadline is not None, "convene() requiere un deadline explícito (V4 §2) — no se calcula aquí"
+        """deadline es keyword-only y obligatorio -- no se calcula aquí, ni
+        hay fallback interno (V4 §2 / corrección delta-2)."""
         overrides = god_overrides or {}
 
         # El Lector: para documentos grandes genera digest antes de invocar los dioses
@@ -822,10 +826,11 @@ class Council:
         self,
         responses: list[GodResponse],
         query: str,
+        *,
+        deadline: float,
         budget_tier: str = "standard",
         system_extra: str = "",
         peer_critiques: list | None = None,
-        deadline: float = None,
     ) -> tuple[str, list[SynthesisAttempt]]:
         """Devuelve (contenido_operativo, lista_de_intentos) — máximo 2
         intentos totales, 402 incluido dentro de ese máximo (V4 §4/§5,
@@ -833,8 +838,8 @@ class Council:
         deliberado de comportamiento respecto a la versión pre-TEST01B):
         un fallo de síntesis ahora se clasifica y se refleja en
         Decree.status='failed', nunca tumba la petición completa con un
-        500 no controlado."""
-        assert deadline is not None, "synthesize() requiere un deadline explícito (V4 §2)"
+        500 no controlado. `deadline` es keyword-only y obligatorio --
+        corrección delta-2, ya no depende de un assert en runtime."""
         successful = [r for r in responses if r.voice_status in USABLE_STATES]
         if not successful:
             failed = [r.god_name for r in responses]
@@ -935,17 +940,18 @@ class Council:
         god_names: list[str],
         query: str,
         context: str = "",
+        *,
+        deadline: float,
         god_overrides: Optional[dict] = None,
         max_tokens: int = 2048,
         doc_id: Optional[str] = None,
         timeout_override: float | None = None,
-        deadline: float = None,
     ) -> AsyncIterator[GodResponse]:
         """Yield de cada GodResponse cuando termina, en orden de llegada.
         Usa _consult_god_with_retry() -- misma clasificación/retry/deadline
         que la ruta no-streaming (V5 §5/V6 -- una sola fuente de verdad
-        compartida entre /query y /query/stream)."""
-        assert deadline is not None, "convene_stream() requiere un deadline explícito (V4 §2)"
+        compartida entre /query y /query/stream). `deadline` keyword-only
+        obligatorio -- corrección delta-2."""
         overrides = god_overrides or {}
         valid_names = [n for n in god_names if n in self.pantheon]
         result_queue: asyncio.Queue[GodResponse] = asyncio.Queue()
@@ -1023,17 +1029,18 @@ class Council:
         self,
         responses: list[GodResponse],
         query: str,
+        *,
+        deadline: float,
         budget_tier: str = "standard",
         peer_critiques: list | None = None,
-        deadline: float = None,
     ) -> AsyncIterator[str | SynthesisAttempt]:
         """Yield de cada chunk de texto (str) y, como ÚLTIMO elemento,
         un SynthesisAttempt terminal estructurado (V5 §6.1) -- el llamador
         debe distinguir por tipo. Regla dura: una vez emitido el primer
         chunk, CERO reintento -- por eso este método nunca reintenta,
         a diferencia de synthesize() (no-streaming) que sí puede hacer un
-        segundo intento completo ANTES de emitir nada."""
-        assert deadline is not None, "synthesize_stream() requiere un deadline explícito (V4 §2)"
+        segundo intento completo ANTES de emitir nada. `deadline`
+        keyword-only obligatorio -- corrección delta-2."""
         t0 = time.monotonic()
         successful = [r for r in responses if r.voice_status in USABLE_STATES]
         if not successful:
@@ -1084,16 +1091,26 @@ class Council:
         timed_out = False
         saw_tool_calls = False   # V3-corrección #4: acumulado entre chunks
         try:
-            stream = await synthesis_client.chat.completions.create(
-                model=synthesis_model,
-                messages=[
-                    {"role": "system", "content": _SYNTHESIS_SYSTEM},
-                    {"role": "user", "content": synthesis_prompt},
-                ],
-                max_tokens=6000,
-                stream=True,
-            )
+            # Corrección delta-2 (hallazgo Codex): la APERTURA del stream
+            # (chat.completions.create(..., stream=True)) vivía FUERA de
+            # asyncio.timeout() -- solo la iteración posterior estaba
+            # acotada. Si el proveedor tardaba en abrir la conexión más
+            # que el `remaining` calculado, ENLIL podía tardar
+            # deadline + tiempo_de_apertura en total y llegar a clasificar
+            # `complete` con contenido posterior al deadline absoluto.
+            # Ahora TODO el bloque -- apertura y consumo -- comparte el
+            # mismo `async with asyncio.timeout(stream_timeout)`, medido
+            # desde el mismo `remaining` de arriba.
             async with asyncio.timeout(stream_timeout):
+                stream = await synthesis_client.chat.completions.create(
+                    model=synthesis_model,
+                    messages=[
+                        {"role": "system", "content": _SYNTHESIS_SYSTEM},
+                        {"role": "user", "content": synthesis_prompt},
+                    ],
+                    max_tokens=6000,
+                    stream=True,
+                )
                 async for chunk in stream:
                     resp_id = resp_id or getattr(chunk, "id", None)
                     resp_model = resp_model or getattr(chunk, "model", None)
@@ -1165,7 +1182,7 @@ class Council:
 
 
 
-    async def peer_review_stream(self, original_responses, original_query: str, deadline: float):
+    async def peer_review_stream(self, original_responses, original_query: str, *, deadline: float):
         """Cada dios revisa anonimamente las voces del resto desde su dominio.
         Yield PeerCritique en orden de llegada (paralelo). `deadline` es
         OBLIGATORIO (V3-corrección #2, hallazgo Codex: antes era opcional
