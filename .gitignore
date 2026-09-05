@@ -23,6 +23,8 @@ benchmark*.log
 # Backups generados
 *.bak
 *.bak.*
+backup_enlil.py
+restore_enlil.py
 
 # Build
 dist/
