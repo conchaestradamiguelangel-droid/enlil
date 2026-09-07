@@ -153,6 +153,19 @@ _ANTHROPIC_MODEL_MAP = {
 }
 
 
+def _enlil_enabled() -> bool:
+    """Kill switch fail-closed propio de ENLIL (independiente del bridge AEGIS).
+    Ausente, vacio, false/0/off o cualquier otro valor => DISABLED.
+    Solo true/1/on (case-insensitive) habilita la ruta hacia modelos de pago."""
+    val = os.environ.get("ENLIL_ENABLED", "").strip().lower()
+    return val in ("true", "1", "on")
+
+
+class EnlilDisabledError(RuntimeError):
+    """ENLIL_ENABLED no esta activo -- bloqueado antes de invocar ningun modelo de pago."""
+    pass
+
+
 class _CircuitBreaker:
     """Sliding-window circuit breaker para el cliente OpenRouter.
 
@@ -393,6 +406,10 @@ class Council:
         NUNCA un GodResponse directamente; la construcción del GodResponse
         final (con el intento operativo elegido) vive en
         _consult_god_with_retry()."""
+        if not _enlil_enabled():
+            raise EnlilDisabledError(
+                "ENLIL_ENABLED no activo (kill switch fail-closed) -- 0 llamadas a modelos"
+            )
         god = self.pantheon[god_name]
         _today = date.today().strftime("%d de %B de %Y")
         _query_type = _classify_query(query)
