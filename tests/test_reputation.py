@@ -8,7 +8,17 @@ from enlil.reputation import ReputationStore
 
 class TestReputationStore:
     def setup_method(self):
+        # build_default_pantheon() devuelve SIEMPRE las mismas instancias
+        # GodProfile (singletons a nivel de modulo, PROFILE en cada
+        # enlil/gods/<dios>.py) -- record_feedback() muta su dict de
+        # reputacion in-place, y esa mutacion sobrevive entre tests y entre
+        # ficheros dentro del mismo proceso de pytest. Reseteamos aqui para
+        # que cada test de esta clase arranque en baseline 0.5 real, sin
+        # depender de que test_orchestrator.py (u otro test futuro) no haya
+        # corrido antes en el mismo proceso.
         self.pantheon = build_default_pantheon()
+        for god in self.pantheon.values():
+            god.reputation.clear()
         self.store = ReputationStore(":memory:")
 
     def test_initial_reputation_neutral(self):
