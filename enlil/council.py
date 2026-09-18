@@ -26,6 +26,7 @@ from .cost_guard import (
     settle as _settle_budget,
     settle_uncertain as _settle_budget_uncertain,
     release as _release_budget,
+    BudgetDeniedError,
 )
 from .reliability import (
     AttemptSignal, AttemptResult, SynthesisAttempt, USABLE_STATES,
@@ -911,73 +912,111 @@ class Council:
                 await asyncio.gather(*still_pending, return_exceptions=True)
 
     async def _synthesis_attempt_once(
-        self, client, model, prompt, system_extra, *, max_tokens, timeout, attempt_number,
+        self, client, model, prompt, system_extra, *, max_tokens, timeout, attempt_number, operation_id,
     ) -> SynthesisAttempt:
         """Un único intento de síntesis, clasificado con la MISMA
         classify_attempt() que las voces (V3 §2, única fuente de verdad).
         Nunca persiste la excepción cruda (V4 §6) — solo exception_type/
-        error_code saneados."""
+        error_code saneados. Protegida por el MISMO guardarrail
+        economico que Council.consult_god() -- reserve()/mark_attempting()/
+        settle()/settle_uncertain()/release() y _compute_settlement()
+        reutilizados sin duplicar arquitectura (SynthesisAttempt comparte
+        los mismos campos de usage que AttemptResult). `operation_id` lo
+        asigna synthesize() una sola vez para sus hasta-2 intentos --
+        cuentan JUNTOS contra ENLIL_MAX_COST_PER_REQUEST_USD, igual que
+        attempt1+retry de un dios."""
         import openai as _oai
-        t0 = time.monotonic()
+        messages = [
+            {"role": "system", "content": _SYNTHESIS_SYSTEM + (chr(10) + system_extra if system_extra else "")},
+            {"role": "user", "content": prompt},
+        ]
+        content_tokens = estimate_content_tokens_from_messages(messages)
         try:
-            resp = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": _SYNTHESIS_SYSTEM + (chr(10) + system_extra if system_extra else "")},
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=max_tokens,
-                ),
-                timeout=timeout,
+            cost_reservation = _reserve_budget(
+                model, max_tokens, input_tokens=content_tokens, operation_id=operation_id,
+                context=f"synthesis attempt={attempt_number}",
             )
-        except _oai.APIStatusError as err:
-            status = getattr(err, "status_code", None)
+        except BudgetDeniedError as exc:
             return SynthesisAttempt(
                 attempt_number=attempt_number, content="", state="error",
                 requested_model=model, max_tokens_budget=max_tokens,
-                latency_ms=round((time.monotonic() - t0) * 1000, 1), usage_state="unknown",
-                exception_type=type(err).__name__, error_code=str(status) if status else None,
-            )
-        except asyncio.TimeoutError:
-            return SynthesisAttempt(
-                attempt_number=attempt_number, content="", state="timeout",
-                requested_model=model, max_tokens_budget=max_tokens,
-                latency_ms=timeout * 1000, usage_state="unknown", exception_type="TimeoutError",
-            )
-        except Exception as exc:
-            return SynthesisAttempt(
-                attempt_number=attempt_number, content="", state="error",
-                requested_model=model, max_tokens_budget=max_tokens,
-                latency_ms=round((time.monotonic() - t0) * 1000, 1), usage_state="unknown",
-                exception_type=type(exc).__name__,
+                latency_ms=0.0, usage_state="unknown",
+                exception_type="BudgetDeniedError", error_code=exc.reason,
             )
 
-        latency = (time.monotonic() - t0) * 1000
-        content = _strip_analisis(resp.choices[0].message.content or "")
-        finish_reason = getattr(resp.choices[0], "finish_reason", None)
-        has_refusal = bool(getattr(resp.choices[0].message, "refusal", None))
-        # V3-corrección #4 (hallazgo Codex): la síntesis no-streaming nunca
-        # comprobaba tool_calls/function_call en absoluto.
-        has_tool_calls = (
-            bool(getattr(resp.choices[0].message, "tool_calls", None))
-            or bool(getattr(resp.choices[0].message, "function_call", None))
-            or finish_reason in ("tool_calls", "function_call")
-        )
-        usage_state, usage_fields = classify_usage(resp.usage)
-        signal = AttemptSignal(
-            finish_reason=finish_reason, content=content, has_refusal=has_refusal,
-            has_unexpected_tool_calls=has_tool_calls,
-        )
-        return SynthesisAttempt(
-            attempt_number=attempt_number, content=content, state=classify_attempt(signal),
-            requested_model=model, returned_model=getattr(resp, "model", None),
-            finish_reason=finish_reason,
-            prompt_tokens=usage_fields["prompt_tokens"], completion_tokens=usage_fields["completion_tokens"],
-            reasoning_tokens=usage_fields["reasoning_tokens"], total_tokens=usage_fields["total_tokens"],
-            usage_state=usage_state, max_tokens_budget=max_tokens, latency_ms=round(latency, 1),
-            generation_id=getattr(resp, "id", None),
-        )
+        settle_mode = "released"
+        actual_cost_usd = 0.0
+        t0 = time.monotonic()
+        try:
+            _mark_attempting_budget(cost_reservation.id)
+            try:
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                    ),
+                    timeout=timeout,
+                )
+            except _oai.APIStatusError as err:
+                status = getattr(err, "status_code", None)
+                settle_mode = "uncertain"
+                return SynthesisAttempt(
+                    attempt_number=attempt_number, content="", state="error",
+                    requested_model=model, max_tokens_budget=max_tokens,
+                    latency_ms=round((time.monotonic() - t0) * 1000, 1), usage_state="unknown",
+                    exception_type=type(err).__name__, error_code=str(status) if status else None,
+                )
+            except asyncio.TimeoutError:
+                settle_mode = "uncertain"
+                return SynthesisAttempt(
+                    attempt_number=attempt_number, content="", state="timeout",
+                    requested_model=model, max_tokens_budget=max_tokens,
+                    latency_ms=timeout * 1000, usage_state="unknown", exception_type="TimeoutError",
+                )
+            except Exception as exc:
+                settle_mode = "uncertain"
+                return SynthesisAttempt(
+                    attempt_number=attempt_number, content="", state="error",
+                    requested_model=model, max_tokens_budget=max_tokens,
+                    latency_ms=round((time.monotonic() - t0) * 1000, 1), usage_state="unknown",
+                    exception_type=type(exc).__name__,
+                )
+
+            latency = (time.monotonic() - t0) * 1000
+            content = _strip_analisis(resp.choices[0].message.content or "")
+            finish_reason = getattr(resp.choices[0], "finish_reason", None)
+            has_refusal = bool(getattr(resp.choices[0].message, "refusal", None))
+            # V3-corrección #4 (hallazgo Codex): la síntesis no-streaming nunca
+            # comprobaba tool_calls/function_call en absoluto.
+            has_tool_calls = (
+                bool(getattr(resp.choices[0].message, "tool_calls", None))
+                or bool(getattr(resp.choices[0].message, "function_call", None))
+                or finish_reason in ("tool_calls", "function_call")
+            )
+            usage_state, usage_fields = classify_usage(resp.usage)
+            signal = AttemptSignal(
+                finish_reason=finish_reason, content=content, has_refusal=has_refusal,
+                has_unexpected_tool_calls=has_tool_calls,
+            )
+            result = SynthesisAttempt(
+                attempt_number=attempt_number, content=content, state=classify_attempt(signal),
+                requested_model=model, returned_model=getattr(resp, "model", None),
+                finish_reason=finish_reason,
+                prompt_tokens=usage_fields["prompt_tokens"], completion_tokens=usage_fields["completion_tokens"],
+                reasoning_tokens=usage_fields["reasoning_tokens"], total_tokens=usage_fields["total_tokens"],
+                usage_state=usage_state, max_tokens_budget=max_tokens, latency_ms=round(latency, 1),
+                generation_id=getattr(resp, "id", None),
+            )
+            actual_cost_usd, settle_mode = _compute_settlement(model, result)
+            return result
+        finally:
+            if settle_mode == "settled":
+                _settle_budget(cost_reservation.id, actual_cost_usd)
+            elif settle_mode == "uncertain":
+                _settle_budget_uncertain(cost_reservation.id, cost_reservation.estimated_usd)
+            else:
+                _release_budget(cost_reservation.id)
 
     async def synthesize(
         self,
@@ -996,7 +1035,29 @@ class Council:
         un fallo de síntesis ahora se clasifica y se refleja en
         Decree.status='failed', nunca tumba la petición completa con un
         500 no controlado. `deadline` es keyword-only y obligatorio --
-        corrección delta-2, ya no depende de un assert en runtime."""
+        corrección delta-2, ya no depende de un assert en runtime.
+
+        Protegida por el MISMO kill switch y guardarrail economico que
+        Council.consult_god() -- ENLIL_ENABLED se comprueba PRIMERO,
+        antes de cualquier otra cosa (gate superior); reserve()/pricing/
+        accounting verificados se exigen antes de tocar la red en
+        _synthesis_attempt_once(). A diferencia de consult_god(), esta
+        funcion nunca propaga la excepcion -- ENLIL_ENABLED=False y
+        BudgetDeniedError se degradan aqui a un SynthesisAttempt
+        clasificado, igual que ya hacia con "todos los dioses fallaron"
+        o el circuit breaker abierto."""
+        if not _enlil_enabled():
+            content = (
+                "⚠ ENLIL_ENABLED no esta activo -- sintesis bloqueada por el kill "
+                "switch (fail-closed), igual que las voces del Consejo."
+            )
+            attempt = SynthesisAttempt(
+                attempt_number=1, content=content, state="error",
+                requested_model="", max_tokens_budget=0, latency_ms=0.0, usage_state="unknown",
+                exception_type="EnlilDisabledError",
+            )
+            return content, [attempt]
+
         successful = [r for r in responses if r.voice_status in USABLE_STATES]
         if not successful:
             failed = [r.god_name for r in responses]
@@ -1034,6 +1095,12 @@ class Council:
             if use_opus
             else self._resolve_model("anthropic/claude-sonnet-5")
         )
+        # UN operation_id para esta operacion logica de sintesis completa
+        # -- attempt1 y su retry (402 o general) cuentan JUNTOS contra
+        # ENLIL_MAX_COST_PER_REQUEST_USD, igual que attempt1+retry de un
+        # dios en _consult_god_with_retry().
+        operation_id = uuid.uuid4().hex
+
         if self._synthesis_circuit.is_open():
             content = (
                 "⚠ La sintesis no esta disponible temporalmente (API degradada). "
@@ -1061,6 +1128,7 @@ class Council:
             attempt1 = await self._synthesis_attempt_once(
                 synthesis_client, synthesis_model, synthesis_prompt, system_extra,
                 max_tokens=6000, timeout=min(240.0, remaining_before_attempt1), attempt_number=1,
+                operation_id=operation_id,
             )
         attempts = [attempt1]
 
@@ -1073,6 +1141,7 @@ class Council:
                 attempt2 = await self._synthesis_attempt_once(
                     synthesis_client, synthesis_model, synthesis_prompt, system_extra,
                     max_tokens=3000, timeout=min(240.0, max(0.0, remaining)), attempt_number=2,
+                    operation_id=operation_id,
                 )
         elif self._retry_eligible(attempt1):
             if remaining > 0:
@@ -1080,6 +1149,7 @@ class Council:
                 attempt2 = await self._synthesis_attempt_once(
                     synthesis_client, synthesis_model, synthesis_prompt, system_extra,
                     max_tokens=retry_max, timeout=min(240.0, max(0.0, remaining)), attempt_number=2,
+                    operation_id=operation_id,
                 )
         if attempt2 is not None:
             attempts.append(attempt2)

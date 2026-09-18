@@ -44,6 +44,46 @@ def _make_council():
     return council
 
 
+@pytest.fixture(autouse=True)
+def _enlil_enabled_and_verified_for_synthesis(monkeypatch):
+    """Council.synthesize()/_synthesis_attempt_once() ahora comparten el
+    mismo kill switch y guardarrail economico que consult_god() -- estos
+    tests llaman a synthesize() directamente contra un cliente mockeado,
+    igual que los de consult_god en otros ficheros, asi que necesitan el
+    mismo patron de fixture (ENLIL_ENABLED=true, caps generosos, pricing
+    y accounting FICTICIOS solo dentro de cada test). anthropic/claude-sonnet-5
+    es el modelo real que synthesize() resuelve para estos tests
+    (self._anthropic_client=None -> use_opus=False ->
+    self._resolve_model("anthropic/claude-sonnet-5"))."""
+    monkeypatch.setenv("ENLIL_ENABLED", "true")
+    monkeypatch.setenv("ENLIL_MAX_COST_PER_REQUEST_USD", "10")
+    monkeypatch.setenv("ENLIL_MAX_COST_DAILY_USD", "1000")
+    monkeypatch.setenv("ENLIL_MAX_COST_MONTHLY_USD", "10000")
+    monkeypatch.setenv("ENLIL_COST_LEDGER_DB", ":memory:")
+    from enlil import pricing as _pricing
+    monkeypatch.setattr(_pricing, "VERIFIED_MODEL_PRICING", {
+        "test-model": _pricing.ModelPricing(
+            input_usd_per_1k=0.003, output_usd_per_1k=0.003, verified=True, source="test-fixture"
+        ),
+        "anthropic/claude-sonnet-5": _pricing.ModelPricing(
+            input_usd_per_1k=0.003, output_usd_per_1k=0.003, verified=True, source="test-fixture"
+        ),
+        "claude-sonnet-5": _pricing.ModelPricing(
+            input_usd_per_1k=0.003, output_usd_per_1k=0.003, verified=True, source="test-fixture"
+        ),
+    })
+    from enlil import input_accounting as _input_accounting
+    _profile = _input_accounting.InputAccountingProfile(
+        strategy=_input_accounting.AccountingStrategy.STATIC_DOCUMENTED_BOUND,
+        verified=True, source="test-fixture",
+    )
+    monkeypatch.setattr(_input_accounting, "VERIFIED_INPUT_ACCOUNTING", {
+        "test-model": _profile,
+        "anthropic/claude-sonnet-5": _profile,
+        "claude-sonnet-5": _profile,
+    })
+
+
 def _voice(state="complete"):
     return GodResponse(
         god_name="MOCK_GOD", model="m", content="voz", tokens_used=10, latency_ms=1.0,

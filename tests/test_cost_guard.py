@@ -32,7 +32,7 @@ from enlil import cost_guard, pricing, input_accounting
 from enlil.budget import estimate_content_token_upper_bound, estimate_content_tokens_from_messages
 from enlil.cost_guard import BudgetDeniedError, reserve, settle, settle_uncertain, release, mark_attempting
 from enlil.council import Council, EnlilDisabledError
-from enlil.gods.base import GodProfile
+from enlil.gods.base import GodProfile, GodResponse
 
 
 def _set_caps(monkeypatch, *, per_request="10", daily="10", monthly="10", db_path=None):
@@ -768,3 +768,154 @@ class TestFallbackReservesCorrectModel:
         models_seen = [r["model"] for r in rows]
         assert "test-model" in models_seen
         assert "claude-sonnet-5" not in models_seen
+
+
+def _voice(state="complete"):
+    return GodResponse(
+        god_name="MOCK_GOD", model="test-model", content="voz", tokens_used=10, latency_ms=1.0,
+        voice_status=state, finish_reason="stop" if state == "complete" else None,
+    )
+
+
+class TestSynthesisCostGuard:
+    """Cierre del hallazgo critico: Council.synthesize()/_synthesis_attempt_once()
+    reutiliza EXACTAMENTE el mismo guardarrail que consult_god() (mismo
+    reserve/mark_attempting/settle/settle_uncertain/release y el mismo
+    _compute_settlement()) -- nada de arquitectura paralela."""
+
+    @pytest.mark.asyncio
+    async def test_enlil_off_synthesize_no_toca_proveedor(self, monkeypatch):
+        monkeypatch.delenv("ENLIL_ENABLED", raising=False)
+        council = _make_council()
+        calls = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            return _resp("no deberia llegar aqui")
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        content, attempts = await council.synthesize([_voice()], "q", deadline=time.monotonic() + 300.0)
+
+        assert len(calls) == 0
+        assert len(attempts) == 1
+        assert attempts[0].exception_type == "EnlilDisabledError"
+
+    @pytest.mark.asyncio
+    async def test_cap_agotado_synthesize_no_toca_proveedor(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "synth_cap.db")
+        _set_verified(monkeypatch, **{"anthropic/claude-sonnet-5": (0.003, 0.003)})
+        # cap por-operacion deliberadamente mas pequeno que la reserva
+        # minima de sintesis (max_tokens=6000 del primer intento)
+        _set_caps(monkeypatch, per_request="0.00001", daily="10", monthly="10", db_path=db)
+
+        council = _make_council()
+        calls = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            return _resp("no deberia llegar aqui")
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        content, attempts = await council.synthesize([_voice()], "q", deadline=time.monotonic() + 300.0)
+
+        assert len(calls) == 0
+        assert attempts[0].exception_type == "BudgetDeniedError"
+
+    @pytest.mark.asyncio
+    async def test_timeout_conserva_worst_case_uncertain(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "synth_timeout.db")
+        _set_verified(monkeypatch, **{"anthropic/claude-sonnet-5": (0.003, 0.003)})
+        _set_caps(monkeypatch, per_request="10", daily="10", monthly="10", db_path=db)
+
+        council = _make_council()
+
+        async def fake_timeout(**kwargs):
+            raise asyncio.TimeoutError()
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_timeout)
+
+        content, attempts = await council.synthesize([_voice()], "q", deadline=time.monotonic() + 300.0)
+
+        assert attempts[0].state == "timeout"
+        conn = cost_guard._db(db)
+        row = conn.execute(
+            "SELECT status, reserved_usd, actual_usd FROM cost_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row["status"] == "uncertain"
+        assert row["actual_usd"] == row["reserved_usd"]
+
+    @pytest.mark.asyncio
+    async def test_retry_revalida_presupuesto_y_se_deniega_si_agotaria_el_cap(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "synth_retry.db")
+        _set_verified(monkeypatch, **{"anthropic/claude-sonnet-5": (0.003, 0.003)})
+
+        council = _make_council()
+        calls = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return _resp("", finish_reason="length", total_tokens=200)
+            return _resp("sintesis completa", finish_reason="stop", total_tokens=50)
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        # Calibrado igual que el equivalente de un dios: cabe el primer
+        # intento (max_tokens=6000) pero no attempt1 liquidado + el
+        # retry (max_tokens=9000).
+        _set_caps(monkeypatch, per_request="0.03", daily="10", monthly="10", db_path=db)
+
+        content, attempts = await council.synthesize([_voice()], "q", deadline=time.monotonic() + 300.0)
+
+        assert len(calls) == 1  # el retry NUNCA llego a tocar al proveedor
+        assert len(attempts) == 2
+        assert attempts[-1].exception_type == "BudgetDeniedError"
+
+    @pytest.mark.asyncio
+    async def test_coste_de_god_y_synthesis_acumulan_en_el_mismo_ledger_agregado(self, monkeypatch, tmp_path):
+        """God y sintesis son operaciones logicas DISTINTAS (operation_id
+        propios) pero comparten el mismo ledger agregado diario/mensual
+        -- si una ya gasto lo suficiente, la otra puede quedar bloqueada
+        por el mismo cap diario, demostrando que SI se contabilizan
+        juntas a ese nivel."""
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "shared_ledger.db")
+        _set_verified(monkeypatch, **{
+            "test-model": (0.003, 0.003),
+            "anthropic/claude-sonnet-5": (0.003, 0.003),
+        })
+        # cap diario que permite UNA de las dos operaciones, no ambas
+        _set_caps(monkeypatch, per_request="10", daily="0.02", monthly="10", db_path=db)
+
+        council = _make_council()
+
+        async def fake_god_create(**kwargs):
+            return _resp("voz del dios", finish_reason="stop", total_tokens=2000)
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_god_create)
+
+        god_result = await council.consult_god("MOCK_GOD", "query", max_tokens=100)
+        assert god_result.state != "error"  # la llamada al dios SI se aprobo (gasta el cap diario)
+
+        # Ahora sintesis usa OTRO modelo (anthropic/claude-sonnet-5) con
+        # OTRO operation_id -- pero el daily cap ya esta agotado por el
+        # dios, asi que debe denegarse igual.
+        async def fake_synth_create(**kwargs):
+            return _resp("no deberia llegar aqui")
+
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_synth_create)
+        content, attempts = await council.synthesize([_voice()], "q", deadline=time.monotonic() + 300.0)
+
+        assert attempts[0].exception_type == "BudgetDeniedError"
+        assert attempts[0].error_code == "daily_cap_exceeded"
