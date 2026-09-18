@@ -397,32 +397,84 @@ class Council:
         """Produce un digest estructurado del documento. Activa El Lector para
         docs >LECTOR_THRESHOLD. Respeta el deadline global (V3-corrección #2,
         hallazgo Codex): si no queda margen, no se lanza la llamada -- se
-        vuelve al chunker de fallback, igual que ante cualquier otro fallo."""
+        vuelve al chunker de fallback, igual que ante cualquier otro fallo.
+
+        Protegida por el MISMO guardarrail economico que consult_god()/
+        synthesize() -- ENLIL_ENABLED, pricing/accounting verificados y
+        reserve() se comprueban ANTES de tocar la red; cualquier fallo
+        (kill switch, presupuesto, timeout, error del proveedor) degrada
+        al mismo "" que ya usaba esta funcion para caer al chunker de
+        fallback -- nunca se inventa contenido ni se propaga excepcion,
+        mismo contrato de siempre."""
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _logger.warning("[Lector] deadline global agotado antes de generar el digest -- usando chunker de fallback")
             return ""
+        if not _enlil_enabled():
+            _logger.warning("[Lector] ENLIL_ENABLED no activo -- usando chunker de fallback (fail-closed)")
+            return ""
         model = _LECTOR_MODELS.get(self.mode, "meta-llama/llama-4-maverick")
         client = self._anthropic_client or self._client
+        messages = [
+            {"role": "system", "content": _LECTOR_SYSTEM},
+            {"role": "user", "content":
+                f"CONSULTA: {query}\n\nDOCUMENTO ({len(text):,} caracteres):\n{text}"},
+        ]
+        content_tokens = estimate_content_tokens_from_messages(messages)
         try:
-            resp = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": _LECTOR_SYSTEM},
-                        {"role": "user", "content":
-                            f"CONSULTA: {query}\n\nDOCUMENTO ({len(text):,} caracteres):\n{text}"},
-                    ],
-                    max_tokens=1800,
-                ),
-                timeout=min(90.0, remaining),
+            cost_reservation = _reserve_budget(
+                model, 1800, input_tokens=content_tokens, context="lector_digest",
             )
+        except BudgetDeniedError as exc:
+            _logger.warning("[Lector] presupuesto denegado (%s) -- usando chunker de fallback", exc.reason)
+            return ""
+
+        settle_mode = "released"
+        actual_cost_usd = 0.0
+        try:
+            _mark_attempting_budget(cost_reservation.id)
+            try:
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=1800,
+                    ),
+                    timeout=min(90.0, remaining),
+                )
+            except Exception as exc:
+                # La red SI se toco (mark_attempting ya se llamo) -- no
+                # sabemos si el proveedor facturo tokens parciales.
+                # Conservamos el worst-case reservado, nunca liberamos a 0.
+                settle_mode = "uncertain"
+                _logger.warning("[Lector] Error generando digest: %s -- usando chunker de fallback", exc)
+                return ""
             digest = resp.choices[0].message.content or ""
             _logger.info("[Lector] Digest generado: %d chars para doc de %d chars", len(digest), len(text))
+            usage_state, usage_fields = classify_usage(resp.usage)
+            if usage_state == "known":
+                try:
+                    actual_cost_usd = estimate_cost_usd(
+                        model,
+                        prompt_tokens=usage_fields["prompt_tokens"],
+                        completion_tokens=usage_fields["completion_tokens"],
+                        total_tokens=usage_fields["total_tokens"],
+                    )
+                    settle_mode = "settled"
+                except Exception:
+                    settle_mode = "uncertain"
+            else:
+                # Respuesta obtenida pero sin usage fiable -- no inventamos
+                # un coste, conservamos el worst-case reservado.
+                settle_mode = "uncertain"
             return f"[DIGEST DEL DOCUMENTO -- {len(text):,} caracteres totales]\n\n{digest}"
-        except Exception as exc:
-            _logger.warning("[Lector] Error generando digest: %s -- usando chunker de fallback", exc)
-            return ""
+        finally:
+            if settle_mode == "settled":
+                _settle_budget(cost_reservation.id, actual_cost_usd)
+            elif settle_mode == "uncertain":
+                _settle_budget_uncertain(cost_reservation.id, cost_reservation.estimated_usd)
+            else:
+                _release_budget(cost_reservation.id)
 
     async def consult_god(
         self,
@@ -1267,7 +1319,29 @@ class Council:
         chunk, CERO reintento -- por eso este método nunca reintenta,
         a diferencia de synthesize() (no-streaming) que sí puede hacer un
         segundo intento completo ANTES de emitir nada. `deadline`
-        keyword-only obligatorio -- corrección delta-2."""
+        keyword-only obligatorio -- corrección delta-2.
+
+        Protegida por el MISMO kill switch y guardarrail economico que
+        synthesize()/consult_god() -- el streaming NO es una excepcion al
+        Cost Guard. ENLIL_ENABLED se comprueba primero (gate superior);
+        reserve() se llama justo antes de abrir el stream, mark_attempting()
+        en el momento de abrirlo, y la liquidacion final (settled/uncertain/
+        released) se decide una sola vez, al final, cubriendo TODOS los
+        caminos de salida (timeout tras iniciar el stream, excepcion
+        durante el consumo, o éxito con/sin usage fiable)."""
+        if not _enlil_enabled():
+            content = (
+                "⚠ ENLIL_ENABLED no esta activo -- sintesis en streaming bloqueada "
+                "por el kill switch (fail-closed)."
+            )
+            yield content
+            yield SynthesisAttempt(
+                attempt_number=1, content=content, state="error",
+                requested_model="", max_tokens_budget=0, latency_ms=0.0, usage_state="unknown",
+                exception_type="EnlilDisabledError",
+            )
+            return
+
         t0 = time.monotonic()
         successful = [r for r in responses if r.voice_status in USABLE_STATES]
         if not successful:
@@ -1310,6 +1384,27 @@ class Council:
             )
             return
         stream_timeout = min(300.0, remaining)
+
+        stream_messages = [
+            {"role": "system", "content": _SYNTHESIS_SYSTEM},
+            {"role": "user", "content": synthesis_prompt},
+        ]
+        content_tokens = estimate_content_tokens_from_messages(stream_messages)
+        try:
+            cost_reservation = _reserve_budget(
+                synthesis_model, 6000, input_tokens=content_tokens, context="synthesis_stream",
+            )
+        except BudgetDeniedError as exc:
+            yield SynthesisAttempt(
+                attempt_number=1, content="", state="error",
+                requested_model=synthesis_model, max_tokens_budget=6000,
+                latency_ms=0.0, usage_state="unknown",
+                exception_type="BudgetDeniedError", error_code=exc.reason,
+            )
+            return
+
+        settle_mode = "released"
+        actual_cost_usd = 0.0
         collected = []
         finish_reason = None
         usage_obj = None
@@ -1318,94 +1413,120 @@ class Council:
         timed_out = False
         saw_tool_calls = False   # V3-corrección #4: acumulado entre chunks
         try:
-            # Corrección delta-2 (hallazgo Codex): la APERTURA del stream
-            # (chat.completions.create(..., stream=True)) vivía FUERA de
-            # asyncio.timeout() -- solo la iteración posterior estaba
-            # acotada. Si el proveedor tardaba en abrir la conexión más
-            # que el `remaining` calculado, ENLIL podía tardar
-            # deadline + tiempo_de_apertura en total y llegar a clasificar
-            # `complete` con contenido posterior al deadline absoluto.
-            # Ahora TODO el bloque -- apertura y consumo -- comparte el
-            # mismo `async with asyncio.timeout(stream_timeout)`, medido
-            # desde el mismo `remaining` de arriba.
-            async with asyncio.timeout(stream_timeout):
-                stream = await synthesis_client.chat.completions.create(
-                    model=synthesis_model,
-                    messages=[
-                        {"role": "system", "content": _SYNTHESIS_SYSTEM},
-                        {"role": "user", "content": synthesis_prompt},
-                    ],
-                    max_tokens=6000,
-                    stream=True,
-                )
-                async for chunk in stream:
-                    resp_id = resp_id or getattr(chunk, "id", None)
-                    resp_model = resp_model or getattr(chunk, "model", None)
-                    if getattr(chunk, "usage", None) is not None:
-                        usage_obj = chunk.usage
-                    if not chunk.choices:
-                        continue
-                    fr = getattr(chunk.choices[0], "finish_reason", None)
-                    if fr:
-                        finish_reason = fr
-                        if fr in ("tool_calls", "function_call"):
+            try:
+                # Corrección delta-2 (hallazgo Codex): la APERTURA del stream
+                # (chat.completions.create(..., stream=True)) vivía FUERA de
+                # asyncio.timeout() -- solo la iteración posterior estaba
+                # acotada. Si el proveedor tardaba en abrir la conexión más
+                # que el `remaining` calculado, ENLIL podía tardar
+                # deadline + tiempo_de_apertura en total y llegar a clasificar
+                # `complete` con contenido posterior al deadline absoluto.
+                # Ahora TODO el bloque -- apertura y consumo -- comparte el
+                # mismo `async with asyncio.timeout(stream_timeout)`, medido
+                # desde el mismo `remaining` de arriba.
+                async with asyncio.timeout(stream_timeout):
+                    _mark_attempting_budget(cost_reservation.id)
+                    stream = await synthesis_client.chat.completions.create(
+                        model=synthesis_model,
+                        messages=stream_messages,
+                        max_tokens=6000,
+                        stream=True,
+                    )
+                    async for chunk in stream:
+                        resp_id = resp_id or getattr(chunk, "id", None)
+                        resp_model = resp_model or getattr(chunk, "model", None)
+                        if getattr(chunk, "usage", None) is not None:
+                            usage_obj = chunk.usage
+                        if not chunk.choices:
+                            continue
+                        fr = getattr(chunk.choices[0], "finish_reason", None)
+                        if fr:
+                            finish_reason = fr
+                            if fr in ("tool_calls", "function_call"):
+                                saw_tool_calls = True
+                        delta_obj = chunk.choices[0].delta
+                        if delta_obj and (getattr(delta_obj, "tool_calls", None) or getattr(delta_obj, "function_call", None)):
                             saw_tool_calls = True
-                    delta_obj = chunk.choices[0].delta
-                    if delta_obj and (getattr(delta_obj, "tool_calls", None) or getattr(delta_obj, "function_call", None)):
-                        saw_tool_calls = True
-                    delta = delta_obj.content if delta_obj else None
-                    if delta:
-                        collected.append(delta)
-                        yield delta
-        except asyncio.TimeoutError:
-            # V3-corrección #5 (hallazgo Codex): antes se emitía un marcador
-            # de texto al cliente ("[Sintesis: tiempo agotado...]") que NUNCA
-            # entraba en `collected` -- el cliente recibía por SSE más texto
-            # del que terminaba persistido y firmado. Ya no se emite ningún
-            # chunk extra aquí: el estado terminal (más abajo) ya comunica
-            # el timeout de forma estructurada, y lo que se persiste/firma
-            # sigue siendo EXACTAMENTE lo que ya se envió como chunks.
-            timed_out = True
-        except Exception as exc:
-            content = "".join(collected)
-            yield SynthesisAttempt(
-                attempt_number=1, content=content, state="error",
-                requested_model=synthesis_model, max_tokens_budget=6000,
-                latency_ms=round((time.monotonic() - t0) * 1000, 1), usage_state="unknown",
-                exception_type=type(exc).__name__,
-            )
-            return
+                        delta = delta_obj.content if delta_obj else None
+                        if delta:
+                            collected.append(delta)
+                            yield delta
+            except asyncio.TimeoutError:
+                # V3-corrección #5 (hallazgo Codex): antes se emitía un marcador
+                # de texto al cliente ("[Sintesis: tiempo agotado...]") que NUNCA
+                # entraba en `collected` -- el cliente recibía por SSE más texto
+                # del que terminaba persistido y firmado. Ya no se emite ningún
+                # chunk extra aquí: el estado terminal (más abajo) ya comunica
+                # el timeout de forma estructurada, y lo que se persiste/firma
+                # sigue siendo EXACTAMENTE lo que ya se envió como chunks.
+                timed_out = True
+                # La red YA se toco (mark_attempting se llamo antes de abrir
+                # el stream) -- no sabemos si el proveedor facturo tokens
+                # parciales de lo que ya se emitio. Conservar el worst-case.
+                settle_mode = "uncertain"
+            except Exception as exc:
+                settle_mode = "uncertain"
+                content = "".join(collected)
+                yield SynthesisAttempt(
+                    attempt_number=1, content=content, state="error",
+                    requested_model=synthesis_model, max_tokens_budget=6000,
+                    latency_ms=round((time.monotonic() - t0) * 1000, 1), usage_state="unknown",
+                    exception_type=type(exc).__name__,
+                )
+                return
 
-        # V3-corrección #5: ya NO se aplica _strip_analisis() aquí -- el
-        # contenido persistido/firmado debe ser byte-idéntico a lo ya
-        # enviado por SSE como chunks (invariante: SSE recibido = contenido
-        # persistido = contenido firmado). Antes esta transformación podía
-        # alterar el texto después de haberlo entregado ya al cliente.
-        content = "".join(collected)
-        latency_ms = round((time.monotonic() - t0) * 1000, 1)
-        if timed_out:
-            if saw_tool_calls:
-                state = "error"
+            # V3-corrección #5: ya NO se aplica _strip_analisis() aquí -- el
+            # contenido persistido/firmado debe ser byte-idéntico a lo ya
+            # enviado por SSE como chunks (invariante: SSE recibido = contenido
+            # persistido = contenido firmado). Antes esta transformación podía
+            # alterar el texto después de haberlo entregado ya al cliente.
+            content = "".join(collected)
+            latency_ms = round((time.monotonic() - t0) * 1000, 1)
+            if timed_out:
+                if saw_tool_calls:
+                    state = "error"
+                else:
+                    state = "truncated" if content.strip() else "timeout"
+                usage_state, usage_fields = "unknown", {"prompt_tokens": None, "completion_tokens": None,
+                                                           "reasoning_tokens": None, "total_tokens": None}
             else:
-                state = "truncated" if content.strip() else "timeout"
-            usage_state, usage_fields = "unknown", {"prompt_tokens": None, "completion_tokens": None,
-                                                       "reasoning_tokens": None, "total_tokens": None}
-        else:
-            usage_state, usage_fields = classify_usage(usage_obj)
-            signal = AttemptSignal(
-                finish_reason=finish_reason, content=content,
-                has_unexpected_tool_calls=saw_tool_calls,
+                usage_state, usage_fields = classify_usage(usage_obj)
+                signal = AttemptSignal(
+                    finish_reason=finish_reason, content=content,
+                    has_unexpected_tool_calls=saw_tool_calls,
+                )
+                state = classify_attempt(signal)
+                if usage_state == "known":
+                    try:
+                        actual_cost_usd = estimate_cost_usd(
+                            synthesis_model,
+                            prompt_tokens=usage_fields["prompt_tokens"],
+                            completion_tokens=usage_fields["completion_tokens"],
+                            total_tokens=usage_fields["total_tokens"],
+                        )
+                        settle_mode = "settled"
+                    except Exception:
+                        settle_mode = "uncertain"
+                else:
+                    # Respuesta obtenida pero sin usage fiable -- no
+                    # inventamos un coste, conservamos el worst-case.
+                    settle_mode = "uncertain"
+            yield SynthesisAttempt(
+                attempt_number=1, content=content, state=state,
+                requested_model=synthesis_model, returned_model=resp_model,
+                finish_reason=finish_reason,
+                prompt_tokens=usage_fields["prompt_tokens"], completion_tokens=usage_fields["completion_tokens"],
+                reasoning_tokens=usage_fields["reasoning_tokens"], total_tokens=usage_fields["total_tokens"],
+                usage_state=usage_state, max_tokens_budget=6000, latency_ms=latency_ms,
+                generation_id=resp_id,
             )
-            state = classify_attempt(signal)
-        yield SynthesisAttempt(
-            attempt_number=1, content=content, state=state,
-            requested_model=synthesis_model, returned_model=resp_model,
-            finish_reason=finish_reason,
-            prompt_tokens=usage_fields["prompt_tokens"], completion_tokens=usage_fields["completion_tokens"],
-            reasoning_tokens=usage_fields["reasoning_tokens"], total_tokens=usage_fields["total_tokens"],
-            usage_state=usage_state, max_tokens_budget=6000, latency_ms=latency_ms,
-            generation_id=resp_id,
-        )
+        finally:
+            if settle_mode == "settled":
+                _settle_budget(cost_reservation.id, actual_cost_usd)
+            elif settle_mode == "uncertain":
+                _settle_budget_uncertain(cost_reservation.id, cost_reservation.estimated_usd)
+            else:
+                _release_budget(cost_reservation.id)
 
 
 

@@ -919,3 +919,353 @@ class TestSynthesisCostGuard:
 
         assert attempts[0].exception_type == "BudgetDeniedError"
         assert attempts[0].error_code == "daily_cap_exceeded"
+
+
+
+class TestLectorDigestCostGuard:
+    """Cierre del bypass conocido #1: _lector_digest() ahora reutiliza el
+    MISMO guardarrail (reserve/mark_attempting/settle/settle_uncertain/
+    release) que consult_god()/synthesize(). Modelo real resuelto para
+    mode="openrouter": meta-llama/llama-4-maverick (_LECTOR_MODELS)."""
+
+    @pytest.mark.asyncio
+    async def test_enlil_off_0_llamadas(self, monkeypatch):
+        monkeypatch.delenv("ENLIL_ENABLED", raising=False)
+        council = _make_council()
+        calls = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            return _resp("digest")
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        digest = await council._lector_digest("texto largo" * 100, "consulta", time.monotonic() + 300.0)
+
+        assert len(calls) == 0
+        assert digest == ""
+
+    @pytest.mark.asyncio
+    async def test_pricing_accounting_ausente_0_llamadas(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        _set_caps(monkeypatch, per_request="10", daily="10", monthly="10", db_path=str(tmp_path / "c.db"))
+        # meta-llama/llama-4-maverick SI tiene pricing real verificado en
+        # produccion (commit anterior) -- lo vaciamos explicitamente aqui
+        # para probar de verdad el caso "ausente", no confiar en que el
+        # modulo real este vacio.
+        _set_pricing(monkeypatch)
+        _set_accounting(monkeypatch)
+        council = _make_council()
+        calls = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            return _resp("digest")
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        digest = await council._lector_digest("texto largo" * 100, "consulta", time.monotonic() + 300.0)
+
+        assert len(calls) == 0
+        assert digest == ""
+
+    @pytest.mark.asyncio
+    async def test_cap_agotado_0_llamadas(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        _set_verified(monkeypatch, **{"meta-llama/llama-4-maverick": (0.0002, 0.0002)})
+        _set_caps(monkeypatch, per_request="0.00001", daily="10", monthly="10", db_path=str(tmp_path / "c.db"))
+        council = _make_council()
+        calls = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            return _resp("digest")
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        digest = await council._lector_digest("texto largo" * 100, "consulta", time.monotonic() + 300.0)
+
+        assert len(calls) == 0
+        assert digest == ""
+
+    @pytest.mark.asyncio
+    async def test_llamada_correcta_ledger_liquidado(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "lector_ok.db")
+        _set_verified(monkeypatch, **{"meta-llama/llama-4-maverick": (0.0002, 0.0002)})
+        _set_caps(monkeypatch, per_request="10", daily="10", monthly="10", db_path=db)
+        council = _make_council()
+
+        async def fake_create(**kwargs):
+            return _resp("digest generado", total_tokens=300)
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        digest = await council._lector_digest("documento de prueba", "consulta", time.monotonic() + 300.0)
+
+        assert "digest generado" in digest
+        conn = cost_guard._db(db)
+        row = conn.execute(
+            "SELECT status, reserved_usd, actual_usd FROM cost_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row["status"] == "settled"
+        assert row["actual_usd"] < row["reserved_usd"]  # coste real, no el worst-case
+
+    @pytest.mark.asyncio
+    async def test_timeout_tras_tocar_red_uncertain(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "lector_timeout.db")
+        _set_verified(monkeypatch, **{"meta-llama/llama-4-maverick": (0.0002, 0.0002)})
+        _set_caps(monkeypatch, per_request="10", daily="10", monthly="10", db_path=db)
+        council = _make_council()
+
+        async def fake_timeout(**kwargs):
+            raise asyncio.TimeoutError()
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_timeout)
+
+        digest = await council._lector_digest("documento de prueba", "consulta", time.monotonic() + 300.0)
+
+        assert digest == ""  # cae al chunker de fallback, como siempre
+        conn = cost_guard._db(db)
+        row = conn.execute(
+            "SELECT status, reserved_usd, actual_usd FROM cost_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row["status"] == "uncertain"
+        assert row["actual_usd"] == row["reserved_usd"]
+
+    @pytest.mark.asyncio
+    async def test_storage_falla_la_reserva_sigue_contando(self, monkeypatch, tmp_path):
+        """Rompe _db() SOLO en la 3a llamada interna (reserve=1,
+        mark_attempting=2, settle=3) -- reserve/mark_attempting deben
+        seguir funcionando con normalidad, y solo el settle final falla."""
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "lector_storage.db")
+        _set_verified(monkeypatch, **{"meta-llama/llama-4-maverick": (0.0002, 0.0002)})
+        _set_caps(monkeypatch, per_request="10", daily="10", monthly="10", db_path=db)
+        council = _make_council()
+
+        async def fake_create(**kwargs):
+            return _resp("digest", total_tokens=100)
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        original_db = cost_guard._db
+        call_count = {"n": 0}
+
+        def _fail_third_call(path):
+            call_count["n"] += 1
+            if call_count["n"] == 3:
+                raise OSError("disco no disponible durante el settle (simulado)")
+            return original_db(path)
+
+        cost_guard._db = _fail_third_call
+        try:
+            digest = await council._lector_digest("doc de prueba", "consulta", time.monotonic() + 300.0)
+        finally:
+            cost_guard._db = original_db
+
+        assert "digest" in digest  # la respuesta SI se obtuvo bien
+        conn = cost_guard._db(db)
+        row = conn.execute(
+            "SELECT status, reserved_usd, actual_usd FROM cost_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        # El settle NUNCA se aplico -- la fila sigue en el estado previo
+        # (attempting) con su reserved_usd intacto, nunca desaparecio ni
+        # se puso a 0 por el fallo de storage.
+        assert row["status"] == "attempting"
+        assert row["actual_usd"] is None
+        assert row["reserved_usd"] > 0
+
+
+class TestSynthesizeStreamCostGuard:
+    """Cierre del bypass conocido #2: Council.synthesize_stream() ahora
+    reutiliza el MISMO guardarrail. El streaming NO es una excepcion al
+    Cost Guard."""
+
+    @staticmethod
+    async def _collect(council, deadline):
+        items = []
+        async for item in council.synthesize_stream([_voice()], "q", deadline=deadline):
+            items.append(item)
+        return items
+
+    @pytest.mark.asyncio
+    async def test_enlil_off_0_llamadas(self, monkeypatch):
+        monkeypatch.delenv("ENLIL_ENABLED", raising=False)
+        council = _make_council()
+        calls = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            raise AssertionError("no deberia llegar aqui")
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        items = await self._collect(council, time.monotonic() + 300.0)
+
+        assert len(calls) == 0
+        assert items[-1].exception_type == "EnlilDisabledError"
+
+    @pytest.mark.asyncio
+    async def test_pricing_accounting_ausente_0_llamadas(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        _set_caps(monkeypatch, per_request="10", daily="10", monthly="10", db_path=str(tmp_path / "c.db"))
+        # anthropic/claude-sonnet-5 SI tiene pricing real verificado en
+        # produccion (commit anterior) -- lo vaciamos explicitamente para
+        # probar de verdad el caso "ausente".
+        _set_pricing(monkeypatch)
+        _set_accounting(monkeypatch)
+        council = _make_council()
+        calls = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            raise AssertionError("no deberia llegar aqui")
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        items = await self._collect(council, time.monotonic() + 300.0)
+
+        assert len(calls) == 0
+        assert items[-1].exception_type == "BudgetDeniedError"
+
+    @pytest.mark.asyncio
+    async def test_cap_agotado_0_llamadas(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        _set_verified(monkeypatch, **{"anthropic/claude-sonnet-5": (0.003, 0.003)})
+        _set_caps(monkeypatch, per_request="0.00001", daily="10", monthly="10", db_path=str(tmp_path / "c.db"))
+        council = _make_council()
+        calls = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            raise AssertionError("no deberia llegar aqui")
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        items = await self._collect(council, time.monotonic() + 300.0)
+
+        assert len(calls) == 0
+        assert items[-1].exception_type == "BudgetDeniedError"
+
+    @pytest.mark.asyncio
+    async def test_llamada_correcta_ledger_liquidado(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "stream_ok.db")
+        _set_verified(monkeypatch, **{"anthropic/claude-sonnet-5": (0.003, 0.003)})
+        _set_caps(monkeypatch, per_request="10", daily="10", monthly="10", db_path=db)
+        council = _make_council()
+
+        async def fake_stream():
+            chunk = MagicMock()
+            chunk.id = "s1"
+            chunk.model = "anthropic/claude-sonnet-5"
+            chunk.usage = MagicMock(total_tokens=300, prompt_tokens=100, completion_tokens=200)
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta = MagicMock(content="respuesta", tool_calls=None, function_call=None)
+            chunk.choices[0].finish_reason = "stop"
+            yield chunk
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(return_value=fake_stream())
+
+        items = await self._collect(council, time.monotonic() + 300.0)
+
+        assert items[-1].usage_state == "known"
+        conn = cost_guard._db(db)
+        row = conn.execute(
+            "SELECT status, reserved_usd, actual_usd FROM cost_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row["status"] == "settled"
+        assert row["actual_usd"] < row["reserved_usd"]
+
+    @pytest.mark.asyncio
+    async def test_timeout_tras_tocar_red_uncertain(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "stream_timeout.db")
+        _set_verified(monkeypatch, **{"anthropic/claude-sonnet-5": (0.003, 0.003)})
+        _set_caps(monkeypatch, per_request="10", daily="10", monthly="10", db_path=db)
+        council = _make_council()
+
+        async def fake_create(**kwargs):
+            await asyncio.sleep(10.0)  # nunca llega, lo corta el asyncio.timeout interno
+            return None
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
+
+        items = await self._collect(council, time.monotonic() + 0.05)
+
+        assert items[-1].state in ("timeout", "truncated")
+        conn = cost_guard._db(db)
+        row = conn.execute(
+            "SELECT status, reserved_usd, actual_usd FROM cost_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row["status"] == "uncertain"
+        assert row["actual_usd"] == row["reserved_usd"]
+
+    @pytest.mark.asyncio
+    async def test_storage_falla_la_reserva_sigue_contando(self, monkeypatch, tmp_path):
+        """Rompe _db() SOLO en la 3a llamada interna (reserve=1,
+        mark_attempting=2, settle=3) -- reserve/mark_attempting deben
+        seguir funcionando con normalidad, y solo el settle final falla."""
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "stream_storage.db")
+        _set_verified(monkeypatch, **{"anthropic/claude-sonnet-5": (0.003, 0.003)})
+        _set_caps(monkeypatch, per_request="10", daily="10", monthly="10", db_path=db)
+        council = _make_council()
+
+        async def fake_stream():
+            chunk = MagicMock()
+            chunk.id = "s1"
+            chunk.model = "anthropic/claude-sonnet-5"
+            chunk.usage = MagicMock(total_tokens=300, prompt_tokens=100, completion_tokens=200)
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta = MagicMock(content="respuesta", tool_calls=None, function_call=None)
+            chunk.choices[0].finish_reason = "stop"
+            yield chunk
+
+        council._client = MagicMock()
+        council._client.chat.completions.create = AsyncMock(return_value=fake_stream())
+
+        original_db = cost_guard._db
+        call_count = {"n": 0}
+
+        def _fail_third_call(path):
+            call_count["n"] += 1
+            if call_count["n"] == 3:
+                raise OSError("disco no disponible durante el settle (simulado)")
+            return original_db(path)
+
+        cost_guard._db = _fail_third_call
+        try:
+            items = await self._collect(council, time.monotonic() + 300.0)
+        finally:
+            cost_guard._db = original_db
+
+        assert items[-1].usage_state == "known"  # la respuesta SI se obtuvo bien
+        conn = cost_guard._db(db)
+        row = conn.execute(
+            "SELECT status, reserved_usd, actual_usd FROM cost_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        # El settle NUNCA se aplico -- la fila sigue en el estado previo
+        # (attempting) con su reserved_usd intacto.
+        assert row["status"] == "attempting"
+        assert row["actual_usd"] is None
+        assert row["reserved_usd"] > 0

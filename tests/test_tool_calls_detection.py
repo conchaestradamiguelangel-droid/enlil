@@ -39,6 +39,9 @@ def _enlil_enabled_for_council_calls(monkeypatch):
         "claude-sonnet-5": _pricing.ModelPricing(
             input_usd_per_1k=0.003, output_usd_per_1k=0.003, verified=True, source="test-fixture"
         ),
+        "anthropic/claude-sonnet-5": _pricing.ModelPricing(
+            input_usd_per_1k=0.003, output_usd_per_1k=0.003, verified=True, source="test-fixture"
+        ),
     })
     # Input accounting verificado (cierre de garantia adicional): pricing
     # verificado ya NO basta por si solo -- reserve() exige ademas un
@@ -51,6 +54,10 @@ def _enlil_enabled_for_council_calls(monkeypatch):
             verified=True, source="test-fixture",
         ),
         "claude-sonnet-5": _input_accounting.InputAccountingProfile(
+            strategy=_input_accounting.AccountingStrategy.STATIC_DOCUMENTED_BOUND,
+            verified=True, source="test-fixture",
+        ),
+        "anthropic/claude-sonnet-5": _input_accounting.InputAccountingProfile(
             strategy=_input_accounting.AccountingStrategy.STATIC_DOCUMENTED_BOUND,
             verified=True, source="test-fixture",
         ),
