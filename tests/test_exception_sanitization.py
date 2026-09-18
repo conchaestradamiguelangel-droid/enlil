@@ -1,6 +1,7 @@
 """TEST 01B — ninguna excepción Python cruda llega al JSON persistido
 (ENLIL_TEST01B_AUDITORIA_DISENO_V4.md §6)."""
 import asyncio
+import pytest
 import json
 import os
 import time
@@ -8,6 +9,16 @@ from dataclasses import asdict
 from unittest.mock import AsyncMock, MagicMock
 
 os.environ.setdefault("OPENROUTER_API_KEY", "sk-or-test")
+
+
+@pytest.fixture(autouse=True)
+def _enlil_enabled_for_council_calls(monkeypatch):
+    """Estos tests llaman a Council.consult_god()/convene() directamente contra
+    un cliente mockeado -- necesitan el kill switch en ON solo dentro de cada
+    test, nunca en el proceso real. No toca .env ni el comportamiento
+    productivo de _enlil_enabled()."""
+    monkeypatch.setenv("ENLIL_ENABLED", "true")
+
 
 from enlil.council import Council
 from enlil.gods.base import GodProfile
