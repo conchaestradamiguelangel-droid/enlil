@@ -193,11 +193,36 @@ class TestContentTokenBound:
 # ---------------------------------------------------------------------------
 
 class TestPricingVerification:
-    def test_produccion_real_tiene_ambas_tablas_vacias(self):
+    def test_produccion_real_tiene_los_9_modelos_reales_verificados(self):
         """Sin ningun monkeypatch -- confirma el estado REAL de las dos
-        tablas de verificacion en produccion."""
-        assert pricing.VERIFIED_MODEL_PRICING == {}
-        assert input_accounting.VERIFIED_INPUT_ACCOUNTING == {}
+        tablas en produccion. Poblado con datos obtenidos en vivo de
+        OpenRouter (GET /api/v1/models) y https://claude.com/pricing --
+        ver enlil/pricing.py y enlil/input_accounting.py para las
+        fuentes/fechas exactas de cada entrada."""
+        modelos_reales_del_panteon = {
+            "anthropic/claude-sonnet-5",       # Claude
+            "deepseek/deepseek-v4-pro",         # Enki, Nabu
+            "nvidia/nemotron-3-ultra-550b-a55b",  # Ninurta
+            "google/gemini-2.5-pro-preview",    # Anu
+            "anthropic/claude-opus-5",          # Marduk
+            "x-ai/grok-4.5",                    # Nergal
+            "meta-llama/llama-4-maverick",      # Tiamat
+        }
+        fallback_anthropic_directo = {"claude-sonnet-5", "claude-opus-5", "claude-sonnet-4-6"}
+
+        for model in modelos_reales_del_panteon | fallback_anthropic_directo:
+            price = pricing.VERIFIED_MODEL_PRICING.get(model)
+            assert price is not None and price.verified, f"pricing no verificado: {model}"
+            acct = input_accounting.VERIFIED_INPUT_ACCOUNTING.get(model)
+            assert acct is not None and acct.verified, f"accounting no verificado: {model}"
+
+        # Bloqueo real documentado -- Inanna (mistralai/mistral-large-2512):
+        # 0 endpoints en tiempo real en OpenRouter hoy. NO debe tener
+        # entrada verificada -- si alguna vez aparece aqui sin que se haya
+        # resuelto el bloqueo real, es una regresion (alguien inventando
+        # una equivalencia no documentada).
+        assert "mistralai/mistral-large-2512" not in pricing.VERIFIED_MODEL_PRICING
+        assert "mistralai/mistral-large-2512" not in input_accounting.VERIFIED_INPUT_ACCOUNTING
 
     def test_input_y_output_se_facturan_a_tarifas_distintas(self, monkeypatch, tmp_path):
         _set_caps(monkeypatch, per_request="10", daily="10", monthly="10", db_path=str(tmp_path / "c.db"))

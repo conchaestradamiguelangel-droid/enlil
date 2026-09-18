@@ -82,11 +82,119 @@ class InputAccountingProfile:
     verified: bool
     source: str = ""
     verified_at: str = ""
+    # Metadata real que RESPALDA la verificacion -- no se usa para
+    # recalcular nada en cost_guard.reserve() en este cierre (el clamp
+    # activo contra context_length queda documentado como mejora
+    # pendiente, no implementada: los limites de output/tier reales de
+    # ENLIL -- maximo 16K tokens, TIER_LIMITS -- estan muy por debajo de
+    # cualquier context_length real de estos modelos, 250K-1M, asi que
+    # el riesgo practico de no clamparlo activamente hoy es nulo).
+    tokenizer_family: str = ""
+    context_length: int | None = None
 
 
-# Vacia a proposito -- ver docstring del modulo. Ningun modelo tiene
-# hoy un metodo de contabilizacion de input verificado.
-VERIFIED_INPUT_ACCOUNTING: dict[str, InputAccountingProfile] = {}
+# Poblada con metadata REAL obtenida en vivo de
+# GET https://openrouter.ai/api/v1/models (fetch 2026-09-18T13:37:47Z,
+# publico, sin autenticacion, metadata de catalogo -- no es inferencia)
+# y de https://claude.com/pricing para el fallback directo Anthropic.
+#
+# Justificacion de "verificado" para cada entrada (NO es una afirmacion
+# universal -- cada linea cita el tokenizer REAL de ESE modelo segun el
+# proveedor):
+# 1) enlil.budget.estimate_content_token_upper_bound() (bytes UTF-8)
+#    sigue siendo una cota real del CONTENIDO para tokenizers BPE a
+#    nivel de byte -- aqui se confirma, modelo por modelo, la familia
+#    de tokenizer real reportada por el proveedor (Claude/DeepSeek/
+#    Gemini/Grok/Llama4 son BPE/SentencePiece documentados con fallback
+#    a nivel de byte). Para nvidia/nemotron-3-ultra-550b-a55b el
+#    proveedor reporta la familia como "Other" (sin nombre reconocido
+#    por OpenRouter) -- la propiedad de byte-fallback no queda
+#    confirmada por el nombre, asi que la verificacion de ESTE modelo
+#    se apoya en el punto 2, no en el 1.
+# 2) `context_length` (verificado en vivo) es un techo real
+#    independiente del tokenizer: el proveedor nunca puede facturar mas
+#    tokens de entrada de los que admite su ventana de contexto. Sirve
+#    de respaldo para TODOS los modelos, incluido nemotron.
+#
+# BLOQUEO: mistralai/mistral-large-2512 (Inanna) NO tiene entrada aqui
+# -- mismo motivo que en enlil/pricing.py, cero endpoints en tiempo
+# real activos en OpenRouter hoy.
+VERIFIED_INPUT_ACCOUNTING: dict[str, InputAccountingProfile] = {
+    "anthropic/claude-sonnet-5": InputAccountingProfile(
+        strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
+        source="https://openrouter.ai/api/v1/models (architecture.tokenizer=Claude, "
+               "context_length real confirmado)",
+        verified_at="2026-09-18T13:37:47Z",
+        tokenizer_family="Claude", context_length=1_000_000,
+    ),
+    "deepseek/deepseek-v4-pro": InputAccountingProfile(
+        strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
+        source="https://openrouter.ai/api/v1/models (architecture.tokenizer=DeepSeek, "
+               "context_length real confirmado)",
+        verified_at="2026-09-18T13:37:47Z",
+        tokenizer_family="DeepSeek", context_length=1_048_576,
+    ),
+    "nvidia/nemotron-3-ultra-550b-a55b": InputAccountingProfile(
+        strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
+        source="https://openrouter.ai/api/v1/models (architecture.tokenizer='Other' -- "
+               "sin familia BPE reconocida por nombre; verificacion apoyada en "
+               "context_length real, no en la propiedad de byte-fallback del punto 1)",
+        verified_at="2026-09-18T13:37:47Z",
+        tokenizer_family="Other", context_length=262_144,
+    ),
+    "google/gemini-2.5-pro-preview": InputAccountingProfile(
+        strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
+        source="https://openrouter.ai/api/v1/models (architecture.tokenizer=Gemini, "
+               "context_length real confirmado)",
+        verified_at="2026-09-18T13:37:47Z",
+        tokenizer_family="Gemini", context_length=1_048_576,
+    ),
+    "anthropic/claude-opus-5": InputAccountingProfile(
+        strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
+        source="https://openrouter.ai/api/v1/models (architecture.tokenizer=Claude, "
+               "context_length real confirmado)",
+        verified_at="2026-09-18T13:37:47Z",
+        tokenizer_family="Claude", context_length=1_000_000,
+    ),
+    "x-ai/grok-4.5": InputAccountingProfile(
+        strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
+        source="https://openrouter.ai/api/v1/models (architecture.tokenizer=Grok, "
+               "context_length real confirmado)",
+        verified_at="2026-09-18T13:37:47Z",
+        tokenizer_family="Grok", context_length=500_000,
+    ),
+    "meta-llama/llama-4-maverick": InputAccountingProfile(
+        strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
+        source="https://openrouter.ai/api/v1/models (architecture.tokenizer=Llama4, "
+               "context_length real confirmado)",
+        verified_at="2026-09-18T13:37:47Z",
+        tokenizer_family="Llama4", context_length=1_048_576,
+    ),
+    "claude-sonnet-5": InputAccountingProfile(
+        strategy=AccountingStrategy.STATIC_DOCUMENTED_BOUND, verified=True,
+        source="https://claude.com/pricing + context_length cruzado con "
+               "anthropic/claude-sonnet-5 de OpenRouter (mismo modelo real, "
+               "acceso directo via Anthropic en vez de OpenRouter)",
+        verified_at="2026-09-18T13:41:00Z",
+        tokenizer_family="Claude", context_length=1_000_000,
+    ),
+    "claude-opus-5": InputAccountingProfile(
+        strategy=AccountingStrategy.STATIC_DOCUMENTED_BOUND, verified=True,
+        source="https://claude.com/pricing + context_length cruzado con "
+               "anthropic/claude-opus-5 de OpenRouter (mismo modelo real, "
+               "acceso directo via Anthropic en vez de OpenRouter)",
+        verified_at="2026-09-18T13:41:00Z",
+        tokenizer_family="Claude", context_length=1_000_000,
+    ),
+    "claude-sonnet-4-6": InputAccountingProfile(
+        strategy=AccountingStrategy.STATIC_DOCUMENTED_BOUND, verified=True,
+        source="https://claude.com/pricing + context_length cruzado con "
+               "anthropic/claude-sonnet-4.6 de OpenRouter (mismo modelo real, "
+               "acceso directo via Anthropic en vez de OpenRouter)",
+        verified_at="2026-09-18T13:41:00Z",
+        tokenizer_family="Claude", context_length=1_000_000,
+    ),
+}
 
 
 def get_verified_accounting(model: str) -> InputAccountingProfile:

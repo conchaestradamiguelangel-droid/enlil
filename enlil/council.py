@@ -19,7 +19,7 @@ from .document_rag import RAG_THRESHOLD
 LECTOR_THRESHOLD = 50_000   # chars -- por encima activa El Lector (digest estructurado)
 from .telemetry import record_god_call, span
 from .budget import estimate_content_tokens_from_messages
-from .pricing import estimate_cost_usd
+from .pricing import estimate_cost_usd, get_verified_pricing
 from .cost_guard import (
     reserve as _reserve_budget,
     mark_attempting as _mark_attempting_budget,
@@ -600,6 +600,34 @@ class Council:
 
             # Llamada normal — tracking de fallos para el circuit breaker
             _mark_attempting_budget(_cost_reservation.id)
+            # provider.max_price (solo OpenRouter): el propio OpenRouter
+            # rechaza la llamada si el proveedor real que enrutaria supera
+            # el precio verificado -- defensa adicional del lado del
+            # proveedor, no sustituye el gate de cost_guard (que ya
+            # aprobo la reserva con ese mismo precio verificado momentos
+            # antes). Unidades de max_price: USD/millon de tokens (ver
+            # https://openrouter.ai/docs/features/provider-routing) --
+            # distintas de ModelPricing.input_usd_per_1k/output_usd_per_1k
+            # (USD/1K tokens), de ahi el *1000 en vez de *1_000_000.
+            _extra_body = None
+            if self.mode == "openrouter":
+                try:
+                    _verified_price = get_verified_pricing(model)
+                    _extra_body = {
+                        "provider": {
+                            "max_price": {
+                                "prompt": _verified_price.input_usd_per_1k * 1000,
+                                "completion": _verified_price.output_usd_per_1k * 1000,
+                            }
+                        }
+                    }
+                except Exception:
+                    # No deberia ocurrir -- reserve() ya verifico pricing
+                    # para este mismo modelo. Si por lo que sea fallara,
+                    # seguimos sin max_price (defensa adicional perdida,
+                    # pero el gate principal de cost_guard sigue intacto)
+                    # en vez de romper la llamada real.
+                    _extra_body = None
             t0 = time.monotonic()
             try:
                 resp = await asyncio.wait_for(
@@ -607,6 +635,7 @@ class Council:
                         model=model,
                         messages=messages,
                         max_tokens=max_tokens,
+                        extra_body=_extra_body,
                     ),
                     timeout=timeout,
                 )

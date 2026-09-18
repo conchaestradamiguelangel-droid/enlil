@@ -63,10 +63,113 @@ class ModelPricing:
     verified_at: str = ""  # fecha ISO de verificacion, "" si nunca
 
 
-# Vacia a proposito -- ver docstring del modulo. Rellenarla con precios
-# reales verificados es una decision humana explicita, no algo que este
-# codigo deba inferir.
-VERIFIED_MODEL_PRICING: dict[str, ModelPricing] = {}
+# Poblada con datos REALES obtenidos en vivo de dos fuentes oficiales
+# (nunca recordados/inferidos -- ver Regla XI/XII de CLAUDE.md):
+#
+# - OpenRouter: GET https://openrouter.ai/api/v1/models (publico, sin
+#   autenticacion, metadata de catalogo -- no es una llamada de
+#   inferencia). Fetch en vivo: 2026-09-18T13:37:47Z.
+# - Anthropic: https://claude.com/pricing (pagina oficial de precios,
+#   sin fecha de actualizacion publicada en la propia pagina -- fecha
+#   de verificacion aqui es la fecha en que Claude Code la consulto,
+#   no una fecha declarada por Anthropic).
+#
+# Los precios de OpenRouter llegan en USD/token; aqui se guardan en
+# USD/1K tokens (multiplicados x1000), sin cambiar cifra significativa.
+#
+# BLOQUEO REAL DOCUMENTADO -- Inanna (mistralai/mistral-large-2512):
+# el modelo EXISTE como entidad en el catalogo de OpenRouter, pero
+# GET /api/v1/models/mistralai/mistral-large-2512/endpoints devuelve
+# "endpoints": [] -- CERO endpoints en tiempo real activos hoy. Solo
+# existe la variante ":batch" (procesamiento asincrono por lotes, NO
+# compatible con una consulta de consejo en vivo). NO se ha inventado
+# ninguna equivalencia ni sustituto -- Inanna se queda sin pricing
+# verificado a proposito hasta que OpenRouter active un endpoint
+# sincrono real para este modelo, o Miguel decida una sustitucion
+# explicita y documentada.
+#
+# LIMITACION CONOCIDA (no oculta): 2 de estos modelos (gemini-2.5-pro-
+# preview y grok-4.5) tienen tarificacion ESCALONADA en OpenRouter --
+# una tarifa mayor si el prompt supera 200,000 tokens. Aqui se guarda
+# SOLO la tarifa base (<200K prompt). Si algun dia una consulta real
+# de ENLIL superase 200K tokens de entrada (hoy tecnicamente imposible:
+# TIER_LIMITS tope 16,000 tokens de salida y los prompts del consejo
+# son ordenes de magnitud menores), el coste real superaria la
+# estimacion de este guardarrail -- riesgo residual documentado, no
+# implementado en este cierre por no ser alcanzable con el uso actual.
+VERIFIED_MODEL_PRICING: dict[str, ModelPricing] = {
+    # --- Ruta primaria OpenRouter (7 modelos reales del panteon; falta
+    #     mistralai/mistral-large-2512 de Inanna, bloqueado arriba) ---
+    "anthropic/claude-sonnet-5": ModelPricing(
+        input_usd_per_1k=0.002, output_usd_per_1k=0.01, verified=True,
+        source="https://openrouter.ai/api/v1/models (id=anthropic/claude-sonnet-5, "
+               "canonical_slug=anthropic/claude-sonnet-5-20260630)",
+        verified_at="2026-09-18T13:37:47Z",
+    ),
+    "deepseek/deepseek-v4-pro": ModelPricing(
+        input_usd_per_1k=0.0016, output_usd_per_1k=0.0032, verified=True,
+        source="https://openrouter.ai/api/v1/models (id=deepseek/deepseek-v4-pro, "
+               "canonical_slug=deepseek/deepseek-v4-pro-20260423)",
+        verified_at="2026-09-18T13:37:47Z",
+    ),
+    "nvidia/nemotron-3-ultra-550b-a55b": ModelPricing(
+        input_usd_per_1k=0.000625, output_usd_per_1k=0.003125, verified=True,
+        source="https://openrouter.ai/api/v1/models (id=nvidia/nemotron-3-ultra-550b-a55b, "
+               "canonical_slug=nvidia/nemotron-3-ultra-550b-a55b-20260604)",
+        verified_at="2026-09-18T13:37:47Z",
+    ),
+    "google/gemini-2.5-pro-preview": ModelPricing(
+        input_usd_per_1k=0.00125, output_usd_per_1k=0.01, verified=True,
+        source="https://openrouter.ai/api/v1/models (id=google/gemini-2.5-pro-preview, "
+               "canonical_slug=google/gemini-2.5-pro-preview-06-05; tarifa BASE, "
+               "<200K prompt tokens -- ver nota de tarificacion escalonada arriba)",
+        verified_at="2026-09-18T13:37:47Z",
+    ),
+    "anthropic/claude-opus-5": ModelPricing(
+        input_usd_per_1k=0.005, output_usd_per_1k=0.025, verified=True,
+        source="https://openrouter.ai/api/v1/models (id=anthropic/claude-opus-5, "
+               "canonical_slug=anthropic/claude-opus-5-20260723)",
+        verified_at="2026-09-18T13:37:47Z",
+    ),
+    "x-ai/grok-4.5": ModelPricing(
+        input_usd_per_1k=0.002, output_usd_per_1k=0.006, verified=True,
+        source="https://openrouter.ai/api/v1/models (id=x-ai/grok-4.5, "
+               "canonical_slug=x-ai/grok-4.5-20260708; tarifa BASE, <200K prompt "
+               "tokens -- ver nota de tarificacion escalonada arriba)",
+        verified_at="2026-09-18T13:37:47Z",
+    ),
+    "meta-llama/llama-4-maverick": ModelPricing(
+        input_usd_per_1k=0.0001875, output_usd_per_1k=0.0006525, verified=True,
+        source="https://openrouter.ai/api/v1/models (id=meta-llama/llama-4-maverick, "
+               "canonical_slug=meta-llama/llama-4-maverick-17b-128e-instruct)",
+        verified_at="2026-09-18T13:37:47Z",
+    ),
+    # --- Fallback directo Anthropic (bare, via self._anthropic_client --
+    #     NO pasa por OpenRouter, claves de dict SIN prefijo de proveedor,
+    #     coinciden con los valores literales de _ANTHROPIC_MODEL_MAP en
+    #     enlil/council.py) ---
+    "claude-sonnet-5": ModelPricing(
+        input_usd_per_1k=0.002, output_usd_per_1k=0.01, verified=True,
+        source="https://claude.com/pricing ('Claude Sonnet 5': $2/MTok input, "
+               "$10/MTok output) -- cruzado con anthropic/claude-sonnet-5 de "
+               "OpenRouter, mismas cifras exactas",
+        verified_at="2026-09-18T13:41:00Z",
+    ),
+    "claude-opus-5": ModelPricing(
+        input_usd_per_1k=0.005, output_usd_per_1k=0.025, verified=True,
+        source="https://claude.com/pricing ('Claude Opus 5': $5/MTok input, "
+               "$25/MTok output) -- cruzado con anthropic/claude-opus-5 de "
+               "OpenRouter, mismas cifras exactas",
+        verified_at="2026-09-18T13:41:00Z",
+    ),
+    "claude-sonnet-4-6": ModelPricing(
+        input_usd_per_1k=0.003, output_usd_per_1k=0.015, verified=True,
+        source="https://claude.com/pricing ('Claude Sonnet 4.6': $3/MTok input, "
+               "$15/MTok output) -- cruzado con anthropic/claude-sonnet-4.6 de "
+               "OpenRouter, mismas cifras exactas",
+        verified_at="2026-09-18T13:41:00Z",
+    ),
+}
 
 
 def get_verified_pricing(model: str) -> ModelPricing:
