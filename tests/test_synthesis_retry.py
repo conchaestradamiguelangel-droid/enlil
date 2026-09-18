@@ -9,8 +9,32 @@ from unittest.mock import AsyncMock, MagicMock
 os.environ.setdefault("OPENROUTER_API_KEY", "sk-or-test")
 
 import openai as _oai
+from enlil import council as _council_module
 from enlil.council import Council
 from enlil.gods.base import GodProfile, GodResponse
+
+
+class _FakeMonotonicClock:
+    """Reloj determinista para test_sin_margen_no_lanza_segundo_intento.
+    Sustituye SOLO la referencia a `time` dentro del modulo enlil.council
+    (via monkeypatch.setattr(_council_module, "time", ...)) -- nunca el
+    modulo `time` global compartido por el resto del proceso/asyncio.
+    Devuelve la secuencia de valores dada, y si se llama mas veces de las
+    previstas sigue avanzando de forma pequena y determinista (nunca
+    lanza ni se congela) para no romper si el codigo productivo llegara
+    a leer el reloj una vez mas de lo esperado."""
+
+    def __init__(self, values):
+        self._values = list(values)
+        self._i = 0
+
+    def monotonic(self):
+        if self._i < len(self._values):
+            v = self._values[self._i]
+        else:
+            v = self._values[-1] + 0.000001 * (self._i - len(self._values) + 1)
+        self._i += 1
+        return v
 
 
 def _make_council():
@@ -125,7 +149,20 @@ class TestSintesisMaximo2Intentos:
 
 
 class TestSintesisDeadline:
-    def test_sin_margen_no_lanza_segundo_intento(self):
+    def test_sin_margen_no_lanza_segundo_intento(self, monkeypatch):
+        """Antes dependia de un margen REAL de 1ms
+        (`time.monotonic() + 0.001`) entre construir `deadline` y las dos
+        lecturas de reloj dentro de Council.synthesize() (la comprobacion
+        de margen antes del intento 1, y la comprobacion de margen para
+        el retry despues) -- bajo carga (p.ej. la suite completa) el
+        overhead real de asyncio/scheduling podia comerse ese margen de
+        formas distintas cada vez, hacia el test intermitente (~1 de cada
+        5-10 ejecuciones dentro de la suite completa, reproducido antes
+        de este fix). Fix: reloj determinista inyectado SOLO en
+        enlil.council (ver _FakeMonotonicClock) -- ninguna lectura de
+        reloj real decide ya el resultado. El test sigue verificando
+        exactamente lo mismo: con margen insuficiente, NO se lanza un
+        segundo intento de sintesis."""
         council = _make_council()
         council._client = MagicMock()
         calls = []
@@ -135,7 +172,16 @@ class TestSintesisDeadline:
             return _synth_resp("", finish_reason="length")
 
         council._client.chat.completions.create = AsyncMock(side_effect=fake_create)
-        deadline = time.monotonic() + 0.001
+
+        deadline = 1_000_000.001  # arbitrario -- monotonic() nunca es un timestamp real, solo se compara consigo mismo
+        fake_clock = _FakeMonotonicClock([
+            1_000_000.0005,  # 1: remaining_before_attempt1 = deadline - esto = 0.0005 > 0 -> SI lanza el intento 1
+            1_000_000.0006,  # 2: t0 dentro de _synthesis_attempt_once
+            1_000_000.0007,  # 3: latency = esto - t0 (irrelevante para la decision de retry)
+            1_000_000.5,     # 4: remaining tras el intento 1 = deadline - esto < 0 -> NO lanza el intento 2
+        ])
+        monkeypatch.setattr(_council_module, "time", fake_clock)
+
         content, attempts = asyncio.run(council.synthesize([_voice()], "q", deadline=deadline))
         assert len(calls) == 1
         assert len(attempts) == 1
