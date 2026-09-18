@@ -16,6 +16,43 @@ def _enlil_enabled_for_council_calls(monkeypatch):
     test, nunca en el proceso real. No toca .env ni el comportamiento
     productivo de _enlil_enabled()."""
     monkeypatch.setenv("ENLIL_ENABLED", "true")
+    # Guardarrail economico (fase 2): caps generosos solo para que estos
+    # tests mockeados lleguen a la logica que estan probando, en una BD
+    # en memoria propia por conexion -- no comparten estado entre tests.
+    monkeypatch.setenv("ENLIL_MAX_COST_PER_REQUEST_USD", "10")
+    monkeypatch.setenv("ENLIL_MAX_COST_DAILY_USD", "1000")
+    monkeypatch.setenv("ENLIL_MAX_COST_MONTHLY_USD", "10000")
+    monkeypatch.setenv("ENLIL_COST_LEDGER_DB", ":memory:")
+    # Pricing verificado (fase 2, cierre de garantias): VERIFIED_MODEL_PRICING
+    # esta vacia en produccion a proposito -- estos tests inyectan precios
+    # FICTICIOS explicitos solo para poder llegar a la logica que prueban,
+    # nunca se presentan como precios reales. Cubre "test-model" (el modelo
+    # mockeado de estos tests) y "claude-sonnet-5" (fallback Anthropic por
+    # defecto si algun test dispara esa rama).
+    from enlil import pricing as _pricing
+    monkeypatch.setattr(_pricing, "VERIFIED_MODEL_PRICING", {
+        "test-model": _pricing.ModelPricing(
+            input_usd_per_1k=0.003, output_usd_per_1k=0.003, verified=True, source="test-fixture"
+        ),
+        "claude-sonnet-5": _pricing.ModelPricing(
+            input_usd_per_1k=0.003, output_usd_per_1k=0.003, verified=True, source="test-fixture"
+        ),
+    })
+    # Input accounting verificado (cierre de garantia adicional): pricing
+    # verificado ya NO basta por si solo -- reserve() exige ademas un
+    # metodo de contabilizacion de input verificado para el modelo,
+    # independiente del pricing. Ficticio, solo para estos tests.
+    from enlil import input_accounting as _input_accounting
+    monkeypatch.setattr(_input_accounting, "VERIFIED_INPUT_ACCOUNTING", {
+        "test-model": _input_accounting.InputAccountingProfile(
+            strategy=_input_accounting.AccountingStrategy.STATIC_DOCUMENTED_BOUND,
+            verified=True, source="test-fixture",
+        ),
+        "claude-sonnet-5": _input_accounting.InputAccountingProfile(
+            strategy=_input_accounting.AccountingStrategy.STATIC_DOCUMENTED_BOUND,
+            verified=True, source="test-fixture",
+        ),
+    })
 
 
 from enlil.council import Council

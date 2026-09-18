@@ -7,6 +7,7 @@ import logging
 import re
 import time
 import os
+import uuid
 from typing import AsyncIterator, Optional
 from openai.types.chat import ChatCompletionMessageParam
 from .gods.base import GodProfile, GodResponse
@@ -17,6 +18,15 @@ from .chunker import chunk_for_god, CHUNK_THRESHOLD
 from .document_rag import RAG_THRESHOLD
 LECTOR_THRESHOLD = 50_000   # chars -- por encima activa El Lector (digest estructurado)
 from .telemetry import record_god_call, span
+from .budget import estimate_content_tokens_from_messages
+from .pricing import estimate_cost_usd
+from .cost_guard import (
+    reserve as _reserve_budget,
+    mark_attempting as _mark_attempting_budget,
+    settle as _settle_budget,
+    settle_uncertain as _settle_budget_uncertain,
+    release as _release_budget,
+)
 from .reliability import (
     AttemptSignal, AttemptResult, SynthesisAttempt, USABLE_STATES,
     classify_attempt, classify_usage, select_operative_attempt,
@@ -316,6 +326,30 @@ def _merge_system_extra(global_extra: str, per_god_extra: str) -> str:
     return chr(10).join(parts)
 
 
+def _compute_settlement(model: str, result: AttemptResult) -> tuple[float, str]:
+    """Traduce un AttemptResult ya clasificado (usage_state de TEST 01B,
+    fuente unica de verdad sobre si el usage es fiable) al coste real
+    liquidable. Solo se confia en el coste cuando usage_state=="known";
+    "partial"/"unknown" se tratan como incertidumbre -- nunca se inventa
+    un numero, se conserva el worst-case reservado (ver settle_uncertain
+    en enlil/cost_guard.py). Cualquier fallo de pricing en este punto
+    (no deberia ocurrir: reserve() ya verifico pricing para este mismo
+    modelo segundos antes) tambien degrada a incertidumbre, nunca
+    revienta la respuesta ya obtenida del proveedor."""
+    if result.usage_state != "known":
+        return 0.0, "uncertain"
+    try:
+        cost = estimate_cost_usd(
+            model,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            total_tokens=result.total_tokens,
+        )
+        return cost, "settled"
+    except Exception:
+        return 0.0, "uncertain"
+
+
 class Council:
     def __init__(self, pantheon: dict[str, GodProfile], rag_store: Optional[DocumentRAGStore] = None) -> None:
         self.pantheon = pantheon
@@ -400,6 +434,7 @@ class Council:
         doc_id: Optional[str] = None,
         original_context: str = "",
         attempt_number: int = 1,
+        operation_id: str | None = None,
     ) -> AttemptResult:
         """Un único intento de llamada al modelo de `god_name`. Devuelve
         un AttemptResult clasificado por classify_attempt() (TEST 01B) —
@@ -481,69 +516,138 @@ class Council:
             {"role": "user", "content": query},
         ]
 
-        # Circuit breaker — respuesta inmediata si OpenRouter está degradado
-        if self.mode == "openrouter" and self._circuit.is_open():
-            if self._anthropic_client:
-                fallback_model = _ANTHROPIC_MODEL_MAP.get(god.model, "claude-sonnet-5")
-                try:
-                    t0 = time.monotonic()
-                    resp = await asyncio.wait_for(
-                        self._anthropic_client.chat.completions.create(
-                            model=fallback_model,
-                            messages=messages,
-                            max_tokens=max_tokens,
-                        ),
-                        timeout=timeout,
-                    )
-                    latency = (time.monotonic() - t0) * 1000
-                    return self._build_attempt_result(
-                        resp, requested_model=f"{fallback_model}[fallback]",
-                        max_tokens=max_tokens, latency_ms=latency, attempt_number=attempt_number,
-                    )
-                except Exception as _fb_exc:
-                    _logger.warning("Anthropic fallback also failed for %s: %s", god_name, _fb_exc, exc_info=_fb_exc)
-            return AttemptResult(
-                attempt_number=attempt_number,
-                state=classify_attempt(AttemptSignal(circuit_open=True)),
-                content="", requested_model=model, max_tokens_budget=max_tokens,
-                latency_ms=0.0, usage_state="unknown",
-            )
+        # Guardarrail economico real (v2) -- unico choke point de llamadas
+        # pagadas. Independiente y posterior al kill switch ENLIL_ENABLED
+        # (arriba). El coste reservado es SIEMPRE input+output juntos (el
+        # techo real de lo que podria facturarse), nunca solo output.
+        # operation_id comparte presupuesto entre attempt 1 y su retry --
+        # lo asigna _consult_god_with_retry(); si no llega ninguno (p.ej.
+        # peer review, una sola llamada sin retry), reserve() genera uno
+        # nuevo automaticamente.
+        #
+        # A vs B: si el circuit breaker esta abierto y hay cliente
+        # Anthropic de fallback, la llamada REAL sera al modelo de
+        # fallback (B), no al primario (A) -- se decide AQUI, antes de
+        # reservar, para reservar con el precio y los tokens del modelo
+        # que de verdad se va a invocar (nunca los de otro).
+        fallback_model = _ANTHROPIC_MODEL_MAP.get(god.model, "claude-sonnet-5")
+        # UNA sola lectura del circuit breaker para toda la llamada -- si
+        # se leyera dos veces (aqui y otra vez mas abajo) un cambio de
+        # estado entre medias podria hacer que la reserva y la rama
+        # realmente ejecutada no coincidan.
+        _circuit_open = self.mode == "openrouter" and self._circuit.is_open()
+        _will_use_fallback = _circuit_open and bool(self._anthropic_client)
+        _model_to_reserve = fallback_model if _will_use_fallback else model
 
-        # Llamada normal — tracking de fallos para el circuit breaker
-        t0 = time.monotonic()
-        try:
-            resp = await asyncio.wait_for(
-                self._client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                ),
-                timeout=timeout,
-            )
-            self._circuit.record_success()
-        except asyncio.TimeoutError:
-            self._circuit.record_failure()
-            record_god_call(god_name, model, 0, (time.monotonic() - t0) * 1000, error=True)
-            raise
-        except Exception as exc:
-            status = getattr(exc, "status_code", None) or getattr(
-                getattr(exc, "response", None), "status_code", None
-            )
-            if status and (status == 429 or status >= 500):
-                self._circuit.record_failure()
-            raise
-        latency = (time.monotonic() - t0) * 1000
-        record_god_call(god_name, model, resp.usage.total_tokens if resp.usage else 0, latency)
-
-        _content = resp.choices[0].message.content or ""
-        for _ln in _content.split("\n"):
-            if _ln.strip().upper().startswith("PERSPECTIVA:"):
-                _store_perspective("", god_name, _query_type, _ln.split(":",1)[-1].strip())
-                break
-        return self._build_attempt_result(
-            resp, requested_model=model, max_tokens=max_tokens,
-            latency_ms=latency, attempt_number=attempt_number,
+        # BudgetDeniedError fail-closed si no hay presupuesto/pricing/
+        # contabilizacion de input verificados; _attempt_or_fallback() ya
+        # clasifica cualquier excepcion como un AttemptResult "error",
+        # igual que hace hoy con EnlilDisabledError -- no hace falta
+        # capturarla aqui aparte. `_content_tokens` es SOLO la cota del
+        # contenido que construimos -- reserve() exige ademas un metodo
+        # de contabilizacion verificado para el modelo antes de confiar
+        # en este numero para gastar dinero real (ver
+        # enlil/input_accounting.py).
+        _content_tokens = estimate_content_tokens_from_messages(messages)
+        _cost_reservation = _reserve_budget(
+            _model_to_reserve, max_tokens, input_tokens=_content_tokens, operation_id=operation_id,
+            context=f"god={god_name} attempt={attempt_number} fallback={_will_use_fallback}",
         )
+        # Por defecto la llamada se considera NUNCA facturable (released) --
+        # solo se cambia de estado si la red llega a tocarse de verdad. Ver
+        # docstring de estados en enlil/cost_guard.py.
+        _settle_mode = "released"
+        _actual_cost_usd = 0.0
+        try:
+            # Circuit breaker — respuesta inmediata si OpenRouter está degradado
+            if _circuit_open:
+                if self._anthropic_client:
+                    try:
+                        _mark_attempting_budget(_cost_reservation.id)
+                        t0 = time.monotonic()
+                        resp = await asyncio.wait_for(
+                            self._anthropic_client.chat.completions.create(
+                                model=fallback_model,
+                                messages=messages,
+                                max_tokens=max_tokens,
+                            ),
+                            timeout=timeout,
+                        )
+                        latency = (time.monotonic() - t0) * 1000
+                        _result = self._build_attempt_result(
+                            resp, requested_model=f"{fallback_model}[fallback]",
+                            max_tokens=max_tokens, latency_ms=latency, attempt_number=attempt_number,
+                        )
+                        _actual_cost_usd, _settle_mode = _compute_settlement(fallback_model, _result)
+                        return _result
+                    except Exception as _fb_exc:
+                        # La red SI se toco (mark_attempting ya se llamo) y
+                        # fallo -- no sabemos si el proveedor facturo tokens
+                        # parciales. Conservamos el worst-case reservado,
+                        # nunca lo liberamos a 0.
+                        _settle_mode = "uncertain"
+                        _logger.warning("Anthropic fallback also failed for %s: %s", god_name, _fb_exc, exc_info=_fb_exc)
+                # Ni se intento el fallback (sin cliente Anthropic) o el
+                # fallback fallo (ya marcado uncertain arriba) -- en el
+                # primer caso _settle_mode sigue en "released" (nunca se
+                # toco la red), en el segundo ya quedo en "uncertain".
+                return AttemptResult(
+                    attempt_number=attempt_number,
+                    state=classify_attempt(AttemptSignal(circuit_open=True)),
+                    content="", requested_model=model, max_tokens_budget=max_tokens,
+                    latency_ms=0.0, usage_state="unknown",
+                )
+
+            # Llamada normal — tracking de fallos para el circuit breaker
+            _mark_attempting_budget(_cost_reservation.id)
+            t0 = time.monotonic()
+            try:
+                resp = await asyncio.wait_for(
+                    self._client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                    ),
+                    timeout=timeout,
+                )
+                self._circuit.record_success()
+            except asyncio.TimeoutError:
+                self._circuit.record_failure()
+                record_god_call(god_name, model, 0, (time.monotonic() - t0) * 1000, error=True)
+                # La llamada llego a enviarse -- el proveedor puede haber
+                # facturado tokens parciales aunque no hayamos recibido
+                # respuesta. Conservar el worst-case, nunca liberar a 0.
+                _settle_mode = "uncertain"
+                raise
+            except Exception as exc:
+                status = getattr(exc, "status_code", None) or getattr(
+                    getattr(exc, "response", None), "status_code", None
+                )
+                if status and (status == 429 or status >= 500):
+                    self._circuit.record_failure()
+                _settle_mode = "uncertain"
+                raise
+            latency = (time.monotonic() - t0) * 1000
+            record_god_call(god_name, model, resp.usage.total_tokens if resp.usage else 0, latency)
+
+            _content = resp.choices[0].message.content or ""
+            for _ln in _content.split("\n"):
+                if _ln.strip().upper().startswith("PERSPECTIVA:"):
+                    _store_perspective("", god_name, _query_type, _ln.split(":",1)[-1].strip())
+                    break
+            _result = self._build_attempt_result(
+                resp, requested_model=model, max_tokens=max_tokens,
+                latency_ms=latency, attempt_number=attempt_number,
+            )
+            _actual_cost_usd, _settle_mode = _compute_settlement(model, _result)
+            return _result
+        finally:
+            if _settle_mode == "settled":
+                _settle_budget(_cost_reservation.id, _actual_cost_usd)
+            elif _settle_mode == "uncertain":
+                _settle_budget_uncertain(_cost_reservation.id, _cost_reservation.estimated_usd)
+            else:
+                _release_budget(_cost_reservation.id)
 
     @staticmethod
     def _build_attempt_result(resp, *, requested_model: str, max_tokens: int,
@@ -614,6 +718,10 @@ class Council:
         god = self.pantheon[name]
         model = self._resolve_model(god.model)
         god_timeout = timeout_override if timeout_override is not None else GOD_TIMEOUTS.get(name, 45.0)
+        # UN solo operation_id para esta operacion logica completa -- attempt
+        # 1 y su retry (si lo hay) cuentan JUNTOS contra
+        # ENLIL_MAX_COST_PER_REQUEST_USD, nunca cada intento por separado.
+        operation_id = uuid.uuid4().hex
 
         # V3-corrección #2 (hallazgo Codex): el PRIMER intento también debe
         # respetar el deadline global, no solo el retry -- antes se lanzaba
@@ -630,6 +738,7 @@ class Council:
             attempt1 = await self._attempt_or_fallback(
                 name, query, context, system_extra, max_tokens, doc_id, original_context,
                 min(god_timeout, remaining_before_attempt1), model, attempt_number=1,
+                operation_id=operation_id,
             )
 
         attempt2 = None
@@ -641,6 +750,7 @@ class Council:
                 attempt2 = await self._attempt_or_fallback(
                     name, query, context, system_extra, retry_max_tokens, doc_id, original_context,
                     retry_timeout, model, attempt_number=2,
+                    operation_id=operation_id,
                 )
             # si no queda tiempo suficiente, NO se lanza el segundo intento (V4 §2/§4)
 
@@ -665,7 +775,7 @@ class Council:
 
     async def _attempt_or_fallback(
         self, name, query, context, system_extra, max_tokens, doc_id, original_context,
-        timeout, model, attempt_number,
+        timeout, model, attempt_number, operation_id=None,
     ) -> AttemptResult:
         """Un intento (1 o 2), capturando timeout/error como AttemptResult
         clasificado — nunca se persiste la excepción cruda (V4 §6)."""
@@ -674,6 +784,7 @@ class Council:
                 name, query, context,
                 system_extra=system_extra, max_tokens=max_tokens, timeout=timeout,
                 doc_id=doc_id, original_context=original_context, attempt_number=attempt_number,
+                operation_id=operation_id,
             )
         except asyncio.TimeoutError:
             return AttemptResult(
