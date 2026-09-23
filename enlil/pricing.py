@@ -153,6 +153,21 @@ VERIFIED_MODEL_PRICING: dict[str, ModelPricing] = {
                "canonical_slug=meta-llama/llama-4-maverick-17b-128e-instruct)",
         verified_at="2026-09-23T20:47:27Z",
     ),
+    # --- Embeddings (QdrantMemoryStore._embed y CorpusStore._embed, via
+    #     enlil/embedding_guard.py). Clave = la cadena LITERAL que ENLIL
+    #     envia a OpenRouter. En el catalogo de embeddings de OpenRouter
+    #     (GET /api/v1/embeddings/models) el unico modelo que corresponde es
+    #     openai/text-embedding-3-small: prompt 0.00000002 USD/token
+    #     (= 0.00002 por 1K), completion 0. Que OpenRouter acepte el slug sin
+    #     prefijo "openai/" no lo documenta el catalogo: se apoya en que la
+    #     coleccion enlil_decrees tiene 1454 puntos escritos con esta misma
+    #     llamada (ultima escritura 2026-09-20). ---
+    "text-embedding-3-small": ModelPricing(
+        input_usd_per_1k=0.00002, output_usd_per_1k=0.0, verified=True,
+        source="https://openrouter.ai/api/v1/embeddings/models (id=openai/text-embedding-3-small, "
+               "prompt=0.00000002/token, completion=0)",
+        verified_at="2026-09-23T20:58:55Z",
+    ),
     # --- Fallback directo Anthropic (bare, via self._anthropic_client --
     #     NO pasa por OpenRouter, claves de dict SIN prefijo de proveedor,
     #     coinciden con los valores literales de _ANTHROPIC_MODEL_MAP en

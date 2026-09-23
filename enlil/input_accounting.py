@@ -170,6 +170,15 @@ VERIFIED_INPUT_ACCOUNTING: dict[str, InputAccountingProfile] = {
         verified_at="2026-09-23T20:47:27Z",
         tokenizer_family="Llama4", context_length=1_048_576,
     ),
+    "text-embedding-3-small": InputAccountingProfile(
+        strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
+        source="https://openrouter.ai/api/v1/embeddings/models (id=openai/text-embedding-3-small, "
+               "architecture.tokenizer='Other', context_length=8192). Entrada acotada por "
+               "construccion: los dos _embed truncan a text[:2000] (<= 8000 bytes UTF-8 <= 8000 "
+               "tokens por la cota de bytes) y el modelo admite 8192 tokens.",
+        verified_at="2026-09-23T20:58:55Z",
+        tokenizer_family="Other", context_length=8192,
+    ),
     "claude-sonnet-5": InputAccountingProfile(
         strategy=AccountingStrategy.STATIC_DOCUMENTED_BOUND, verified=True,
         source="https://claude.com/pricing + context_length cruzado con "

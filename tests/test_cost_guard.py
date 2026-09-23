@@ -1269,3 +1269,239 @@ class TestSynthesizeStreamCostGuard:
         assert row["status"] == "attempting"
         assert row["actual_usd"] is None
         assert row["reserved_usd"] > 0
+
+
+
+def _eval_decree():
+    from enlil.decrees.decree import Decree, GodVoice
+    return Decree(
+        query="consulta de prueba", synthesis="sintesis de prueba",
+        gods_convened=["Claude"], domains=["security"],
+        voices=[GodVoice("Claude", "m", "R1", 100, 500.0)],
+    )
+
+
+def _make_evaluator(create):
+    from enlil.synthesis_evaluator import SynthesisEvaluator
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(side_effect=create)
+    council = MagicMock()
+    council._anthropic_client = None
+    council._client = client
+    council._resolve_model = lambda m: m
+    return SynthesisEvaluator(council, MagicMock(), {"Claude": MagicMock()}), client
+
+
+def _eval_resp(usage=True):
+    r = MagicMock()
+    r.choices = [MagicMock(message=MagicMock(content='{"score": 7, "reasoning": "ok"}'))]
+    r.usage = MagicMock(prompt_tokens=100, completion_tokens=50, total_tokens=150) if usage else None
+    return r
+
+
+class TestSynthesisEvaluatorCostGuard:
+    """Cierre del bypass: SynthesisEvaluator.evaluate() llamaba a
+    claude-sonnet-5 tras cada decreto sin kill switch ni Cost Guard."""
+
+    @pytest.mark.asyncio
+    async def test_enlil_off_0_llamadas(self, monkeypatch):
+        monkeypatch.delenv("ENLIL_ENABLED", raising=False)
+        calls = []
+
+        async def create(**kw):
+            calls.append(kw)
+            return _eval_resp()
+
+        ev, _ = _make_evaluator(create)
+        result = await ev.evaluate(_eval_decree())
+        assert len(calls) == 0
+        assert result["score"] is None
+
+    @pytest.mark.asyncio
+    async def test_pricing_accounting_ausente_0_llamadas(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        _set_caps(monkeypatch, db_path=str(tmp_path / "c.db"))
+        _set_pricing(monkeypatch)
+        _set_accounting(monkeypatch)
+        calls = []
+
+        async def create(**kw):
+            calls.append(kw)
+            return _eval_resp()
+
+        ev, _ = _make_evaluator(create)
+        result = await ev.evaluate(_eval_decree())
+        assert len(calls) == 0
+        assert result["score"] is None
+
+    @pytest.mark.asyncio
+    async def test_cap_agotado_0_llamadas(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        _set_verified(monkeypatch, **{"anthropic/claude-sonnet-5": (0.003, 0.003)})
+        _set_caps(monkeypatch, per_request="0.0000001", db_path=str(tmp_path / "c.db"))
+        calls = []
+
+        async def create(**kw):
+            calls.append(kw)
+            return _eval_resp()
+
+        ev, _ = _make_evaluator(create)
+        result = await ev.evaluate(_eval_decree())
+        assert len(calls) == 0
+        assert result["score"] is None
+
+    @pytest.mark.asyncio
+    async def test_llamada_correcta_fila_settled(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "eval_ok.db")
+        _set_verified(monkeypatch, **{"anthropic/claude-sonnet-5": (0.003, 0.003)})
+        _set_caps(monkeypatch, db_path=db)
+
+        async def create(**kw):
+            return _eval_resp()
+
+        ev, _ = _make_evaluator(create)
+        result = await ev.evaluate(_eval_decree())
+        assert result["score"] == 7
+        conn = cost_guard._db(db)
+        row = conn.execute(
+            "SELECT model, context, status, reserved_usd, actual_usd FROM cost_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row["context"] == "synthesis_evaluator"
+        assert row["status"] == "settled"
+        assert row["actual_usd"] < row["reserved_usd"]
+
+    @pytest.mark.asyncio
+    async def test_timeout_tras_tocar_red_uncertain(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / "eval_timeout.db")
+        _set_verified(monkeypatch, **{"anthropic/claude-sonnet-5": (0.003, 0.003)})
+        _set_caps(monkeypatch, db_path=db)
+
+        async def create(**kw):
+            raise asyncio.TimeoutError()
+
+        ev, _ = _make_evaluator(create)
+        result = await ev.evaluate(_eval_decree())
+        assert result["score"] is None
+        conn = cost_guard._db(db)
+        row = conn.execute(
+            "SELECT status, reserved_usd, actual_usd FROM cost_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row["status"] == "uncertain"
+        assert row["actual_usd"] == row["reserved_usd"]
+
+
+def _embed_client(create=None, usage=True):
+    client = MagicMock()
+    if create is not None:
+        client.embeddings.create = MagicMock(side_effect=create)
+    else:
+        resp = MagicMock()
+        resp.data = [MagicMock(embedding=[0.1, 0.2, 0.3])]
+        resp.usage = MagicMock(prompt_tokens=20, completion_tokens=None, total_tokens=20) if usage else None
+        client.embeddings.create = MagicMock(return_value=resp)
+    return client
+
+
+def _both_embed_paths(client):
+    """Las dos rutas reales de embeddings de ENLIL, sin ejecutar su __init__."""
+    from enlil.memory_qdrant import QdrantMemoryStore
+    from enlil.corpus import CorpusStore
+    q = QdrantMemoryStore.__new__(QdrantMemoryStore)
+    q._embed_client = client
+    c = CorpusStore.__new__(CorpusStore)
+    c._embed_client = client
+    return {"qdrant": q._embed, "corpus": c._embed}
+
+
+class TestEmbeddingsCostGuard:
+    """Cierre del bypass: QdrantMemoryStore._embed() y CorpusStore._embed()
+    llamaban a embeddings (text-embedding-3-small via OpenRouter) sin kill
+    switch ni Cost Guard."""
+
+    def test_produccion_real_tiene_embeddings_verificados(self):
+        assert pricing.VERIFIED_MODEL_PRICING["text-embedding-3-small"].verified
+        assert input_accounting.VERIFIED_INPUT_ACCOUNTING["text-embedding-3-small"].verified
+
+    @pytest.mark.parametrize("path", ["qdrant", "corpus"])
+    def test_enlil_off_0_llamadas(self, monkeypatch, path):
+        monkeypatch.delenv("ENLIL_ENABLED", raising=False)
+        client = _embed_client()
+        assert _both_embed_paths(client)[path]("texto") is None
+        assert client.embeddings.create.call_count == 0
+
+    @pytest.mark.parametrize("path", ["qdrant", "corpus"])
+    def test_pricing_accounting_no_verificado_0_llamadas(self, monkeypatch, tmp_path, path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        _set_caps(monkeypatch, db_path=str(tmp_path / "c.db"))
+        _set_pricing(monkeypatch)
+        _set_accounting(monkeypatch)
+        client = _embed_client()
+        assert _both_embed_paths(client)[path]("texto") is None
+        assert client.embeddings.create.call_count == 0
+
+    @pytest.mark.parametrize("path", ["qdrant", "corpus"])
+    def test_solo_pricing_verificado_sin_accounting_0_llamadas(self, monkeypatch, tmp_path, path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        _set_caps(monkeypatch, db_path=str(tmp_path / "c.db"))
+        _set_pricing(monkeypatch, **{"text-embedding-3-small": (0.00002, 0.0)})
+        _set_accounting(monkeypatch)
+        client = _embed_client()
+        assert _both_embed_paths(client)[path]("texto") is None
+        assert client.embeddings.create.call_count == 0
+
+    @pytest.mark.parametrize("path", ["qdrant", "corpus"])
+    def test_cap_agotado_0_llamadas(self, monkeypatch, tmp_path, path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        _set_verified(monkeypatch, **{"text-embedding-3-small": (0.00002, 0.0)})
+        _set_caps(monkeypatch, per_request="0.0000000001", db_path=str(tmp_path / "c.db"))
+        client = _embed_client()
+        assert _both_embed_paths(client)[path]("texto " * 200) is None
+        assert client.embeddings.create.call_count == 0
+
+    @pytest.mark.parametrize("path", ["qdrant", "corpus"])
+    def test_embedding_correcto_ledger_contabilizado(self, monkeypatch, tmp_path, path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / ("emb_ok_%s.db" % path))
+        _set_verified(monkeypatch, **{"text-embedding-3-small": (0.00002, 0.0)})
+        _set_caps(monkeypatch, db_path=db)
+        client = _embed_client()
+        # texto de 2000 caracteres (el maximo real que pasan los _embed) y
+        # usage realista de 500 tokens -- con textos diminutos el coste
+        # (< 5e-7 USD) redondea a 0.000000 en el ledger, que guarda 6 decimales.
+        client.embeddings.create.return_value.usage = MagicMock(
+            prompt_tokens=500, completion_tokens=None, total_tokens=500)
+        assert _both_embed_paths(client)[path]("a" * 2000) == [0.1, 0.2, 0.3]
+        assert client.embeddings.create.call_count == 1
+        conn = cost_guard._db(db)
+        row = conn.execute(
+            "SELECT model, context, status, reserved_usd, actual_usd FROM cost_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row["model"] == "text-embedding-3-small"
+        assert row["status"] == "settled"
+        assert 0 < row["actual_usd"] <= row["reserved_usd"]
+
+    @pytest.mark.parametrize("path", ["qdrant", "corpus"])
+    def test_error_tras_iniciar_red_uncertain(self, monkeypatch, tmp_path, path):
+        monkeypatch.setenv("ENLIL_ENABLED", "true")
+        db = str(tmp_path / ("emb_err_%s.db" % path))
+        _set_verified(monkeypatch, **{"text-embedding-3-small": (0.00002, 0.0)})
+        _set_caps(monkeypatch, db_path=db)
+
+        def boom(**kw):
+            raise TimeoutError("simulado tras iniciar red")
+
+        client = _embed_client(create=boom)
+        assert _both_embed_paths(client)[path]("texto de prueba") is None
+        assert client.embeddings.create.call_count == 1
+        conn = cost_guard._db(db)
+        row = conn.execute(
+            "SELECT status, reserved_usd, actual_usd FROM cost_ledger ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row["status"] == "uncertain"
+        assert row["actual_usd"] == row["reserved_usd"]

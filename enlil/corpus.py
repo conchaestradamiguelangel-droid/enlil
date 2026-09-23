@@ -852,11 +852,15 @@ class CorpusStore:
             logger.warning(f"[CORPUS] Error asegurando colección: {e}")
 
     def _embed(self, text: str) -> list[float] | None:
+        # Protegido por el mismo kill switch + Cost Guard que las llamadas
+        # de chat (ver enlil/embedding_guard.py). Mismo contrato de siempre.
         try:
-            resp = self._embed_client.embeddings.create(
-                model="text-embedding-3-small",
-                input=text[:2000],
+            from .embedding_guard import guarded_embeddings_create
+            resp = guarded_embeddings_create(
+                self._embed_client, text[:2000], context="corpus_embed",
             )
+            if resp is None:
+                return None
             return resp.data[0].embedding
         except Exception as e:
             logger.warning(f"[CORPUS] Error generando embedding: {e}")

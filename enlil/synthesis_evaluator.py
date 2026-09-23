@@ -2,6 +2,13 @@ import logging
 import json
 import re
 
+from .budget import estimate_content_tokens_from_messages
+from .cost_guard import (
+    BudgetDeniedError, mark_attempting, release, reserve, settle, settle_uncertain,
+)
+from .pricing import estimate_cost_usd
+from .reliability import classify_usage
+
 
 logger = logging.getLogger("enlil.evaluator")
 
@@ -32,17 +39,65 @@ class SynthesisEvaluator:
         """Retorna: {"score": 7, "reasoning": "...", "useful": True}
         Si falla: {"score": None, "reasoning": "evaluation_failed", "useful": None}"""
         try:
+            # Protegido por el MISMO kill switch + Cost Guard que
+            # consult_god()/synthesize(): sin ENLIL_ENABLED, sin pricing/
+            # accounting verificados o sin presupuesto -> no se toca la red
+            # y se devuelve el mismo _ERROR_RESULT que ya usaba ante
+            # cualquier fallo (el llamador ignora score=None).
+            from .council import _enlil_enabled
+            if not _enlil_enabled():
+                logger.warning("SynthesisEvaluator: ENLIL_ENABLED no activo -- evaluacion omitida (fail-closed)")
+                return dict(self._ERROR_RESULT)
             client = self.council._anthropic_client or self.council._client
             model = "claude-sonnet-5" if self.council._anthropic_client else self.council._resolve_model("anthropic/claude-sonnet-5")
             prompt = self._PROMPT_TEMPLATE.format(
                 query=decree.query,
                 synthesis=decree.synthesis,
             )
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=200,
-            )
+            messages = [{"role": "user", "content": prompt}]
+            try:
+                reservation = reserve(
+                    model, 200, input_tokens=estimate_content_tokens_from_messages(messages),
+                    context="synthesis_evaluator",
+                )
+            except BudgetDeniedError as exc:
+                logger.warning("SynthesisEvaluator: presupuesto denegado (%s) -- evaluacion omitida", exc.reason)
+                return dict(self._ERROR_RESULT)
+            settle_mode = "released"
+            actual_cost_usd = 0.0
+            try:
+                mark_attempting(reservation.id)
+                try:
+                    resp = await client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=200,
+                    )
+                except Exception:
+                    # La red SI se toco -- conservar el worst-case reservado.
+                    settle_mode = "uncertain"
+                    raise
+                usage_state, usage_fields = classify_usage(getattr(resp, "usage", None))
+                if usage_state == "known":
+                    try:
+                        actual_cost_usd = estimate_cost_usd(
+                            model,
+                            prompt_tokens=usage_fields["prompt_tokens"],
+                            completion_tokens=usage_fields["completion_tokens"],
+                            total_tokens=usage_fields["total_tokens"],
+                        )
+                        settle_mode = "settled"
+                    except Exception:
+                        settle_mode = "uncertain"
+                else:
+                    settle_mode = "uncertain"
+            finally:
+                if settle_mode == "settled":
+                    settle(reservation.id, actual_cost_usd)
+                elif settle_mode == "uncertain":
+                    settle_uncertain(reservation.id, reservation.estimated_usd)
+                else:
+                    release(reservation.id)
             raw = resp.choices[0].message.content or ""
             parsed = self._parse_response(raw)
             if parsed is None:

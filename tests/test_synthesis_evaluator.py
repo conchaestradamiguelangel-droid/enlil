@@ -8,6 +8,41 @@ from enlil.synthesis_evaluator import SynthesisEvaluator
 from enlil.decrees.decree import Decree, GodVoice
 
 
+@pytest.fixture(autouse=True)
+def _enlil_enabled_and_verified(monkeypatch):
+    """Embeddings y evaluador ahora pasan por el mismo kill switch +
+    Cost Guard que las llamadas de chat -- estos tests ejercitan esas
+    rutas contra clientes mock, asi que necesitan ENLIL_ENABLED, caps y
+    pricing/accounting FICTICIOS solo dentro de cada test."""
+    monkeypatch.setenv("ENLIL_ENABLED", "true")
+    monkeypatch.setenv("ENLIL_MAX_COST_PER_REQUEST_USD", "10")
+    monkeypatch.setenv("ENLIL_MAX_COST_DAILY_USD", "1000")
+    monkeypatch.setenv("ENLIL_MAX_COST_MONTHLY_USD", "10000")
+    monkeypatch.setenv("ENLIL_COST_LEDGER_DB", ":memory:")
+    from enlil import pricing as _pricing
+    monkeypatch.setattr(_pricing, "VERIFIED_MODEL_PRICING", {
+        "text-embedding-3-small": _pricing.ModelPricing(
+            input_usd_per_1k=0.00002, output_usd_per_1k=0.0, verified=True, source="test-fixture"
+        ),
+        "anthropic/claude-sonnet-5": _pricing.ModelPricing(
+            input_usd_per_1k=0.003, output_usd_per_1k=0.003, verified=True, source="test-fixture"
+        ),
+        "claude-sonnet-5": _pricing.ModelPricing(
+            input_usd_per_1k=0.003, output_usd_per_1k=0.003, verified=True, source="test-fixture"
+        ),
+    })
+    from enlil import input_accounting as _input_accounting
+    _profile = _input_accounting.InputAccountingProfile(
+        strategy=_input_accounting.AccountingStrategy.STATIC_DOCUMENTED_BOUND,
+        verified=True, source="test-fixture",
+    )
+    monkeypatch.setattr(_input_accounting, "VERIFIED_INPUT_ACCOUNTING", {
+        "text-embedding-3-small": _profile,
+        "anthropic/claude-sonnet-5": _profile,
+        "claude-sonnet-5": _profile,
+    })
+
+
 def make_decree(query="¿Cómo mejorar seguridad?", synthesis="Usar firewalls.", score_context=None):
     return Decree(
         query=query, synthesis=synthesis,
