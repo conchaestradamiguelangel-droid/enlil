@@ -94,7 +94,7 @@ class InputAccountingProfile:
 
 
 # Poblada con metadata REAL obtenida en vivo de
-# GET https://openrouter.ai/api/v1/models (fetch 2026-09-18T13:37:47Z,
+# GET https://openrouter.ai/api/v1/models (fetch 2026-09-23T20:47:27Z,
 # publico, sin autenticacion, metadata de catalogo -- no es inferencia)
 # y de https://claude.com/pricing para el fallback directo Anthropic.
 #
@@ -124,14 +124,14 @@ VERIFIED_INPUT_ACCOUNTING: dict[str, InputAccountingProfile] = {
         strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
         source="https://openrouter.ai/api/v1/models (architecture.tokenizer=Claude, "
                "context_length real confirmado)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
         tokenizer_family="Claude", context_length=1_000_000,
     ),
     "deepseek/deepseek-v4-pro": InputAccountingProfile(
         strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
         source="https://openrouter.ai/api/v1/models (architecture.tokenizer=DeepSeek, "
                "context_length real confirmado)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
         tokenizer_family="DeepSeek", context_length=1_048_576,
     ),
     "nvidia/nemotron-3-ultra-550b-a55b": InputAccountingProfile(
@@ -139,35 +139,35 @@ VERIFIED_INPUT_ACCOUNTING: dict[str, InputAccountingProfile] = {
         source="https://openrouter.ai/api/v1/models (architecture.tokenizer='Other' -- "
                "sin familia BPE reconocida por nombre; verificacion apoyada en "
                "context_length real, no en la propiedad de byte-fallback del punto 1)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
         tokenizer_family="Other", context_length=262_144,
     ),
     "google/gemini-2.5-pro-preview": InputAccountingProfile(
         strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
         source="https://openrouter.ai/api/v1/models (architecture.tokenizer=Gemini, "
                "context_length real confirmado)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
         tokenizer_family="Gemini", context_length=1_048_576,
     ),
     "anthropic/claude-opus-5": InputAccountingProfile(
         strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
         source="https://openrouter.ai/api/v1/models (architecture.tokenizer=Claude, "
                "context_length real confirmado)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
         tokenizer_family="Claude", context_length=1_000_000,
     ),
     "x-ai/grok-4.5": InputAccountingProfile(
         strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
         source="https://openrouter.ai/api/v1/models (architecture.tokenizer=Grok, "
                "context_length real confirmado)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
         tokenizer_family="Grok", context_length=500_000,
     ),
     "meta-llama/llama-4-maverick": InputAccountingProfile(
         strategy=AccountingStrategy.PROVIDER_SPECIFIC_ACCOUNTING, verified=True,
         source="https://openrouter.ai/api/v1/models (architecture.tokenizer=Llama4, "
                "context_length real confirmado)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
         tokenizer_family="Llama4", context_length=1_048_576,
     ),
     "claude-sonnet-5": InputAccountingProfile(
@@ -175,7 +175,7 @@ VERIFIED_INPUT_ACCOUNTING: dict[str, InputAccountingProfile] = {
         source="https://claude.com/pricing + context_length cruzado con "
                "anthropic/claude-sonnet-5 de OpenRouter (mismo modelo real, "
                "acceso directo via Anthropic en vez de OpenRouter)",
-        verified_at="2026-09-18T13:41:00Z",
+        verified_at="2026-09-23T20:52:00Z",
         tokenizer_family="Claude", context_length=1_000_000,
     ),
     "claude-opus-5": InputAccountingProfile(
@@ -183,7 +183,7 @@ VERIFIED_INPUT_ACCOUNTING: dict[str, InputAccountingProfile] = {
         source="https://claude.com/pricing + context_length cruzado con "
                "anthropic/claude-opus-5 de OpenRouter (mismo modelo real, "
                "acceso directo via Anthropic en vez de OpenRouter)",
-        verified_at="2026-09-18T13:41:00Z",
+        verified_at="2026-09-23T20:52:00Z",
         tokenizer_family="Claude", context_length=1_000_000,
     ),
     "claude-sonnet-4-6": InputAccountingProfile(
@@ -191,7 +191,7 @@ VERIFIED_INPUT_ACCOUNTING: dict[str, InputAccountingProfile] = {
         source="https://claude.com/pricing + context_length cruzado con "
                "anthropic/claude-sonnet-4.6 de OpenRouter (mismo modelo real, "
                "acceso directo via Anthropic en vez de OpenRouter)",
-        verified_at="2026-09-18T13:41:00Z",
+        verified_at="2026-09-23T20:52:00Z",
         tokenizer_family="Claude", context_length=1_000_000,
     ),
 }

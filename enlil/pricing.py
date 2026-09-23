@@ -66,9 +66,18 @@ class ModelPricing:
 # Poblada con datos REALES obtenidos en vivo de dos fuentes oficiales
 # (nunca recordados/inferidos -- ver Regla XI/XII de CLAUDE.md):
 #
+# REVERIFICACION 2026-09-23: los 7 modelos OpenRouter y los 3 Anthropic se
+# volvieron a comprobar en vivo. Solo cambiaron (a la baja) deepseek-v4-pro
+# (0.0016/0.0032 -> 0.000946386/0.001892772 por 1K) y nemotron-3-ultra
+# (0.000625/0.003125 -> 0.0006/0.0024 por 1K). El precio de catalogo de
+# OpenRouter es el del proveedor MAS BARATO del modelo; otros proveedores
+# cobran mas (p.ej. deepseek hasta ~2x). Como provider.max_price se envia
+# con este mismo precio, OpenRouter solo enruta a proveedores <= este
+# precio: protege el gasto, pero si ese proveedor barato cae o sube de
+# precio la llamada la rechaza OpenRouter (sin gasto).
 # - OpenRouter: GET https://openrouter.ai/api/v1/models (publico, sin
 #   autenticacion, metadata de catalogo -- no es una llamada de
-#   inferencia). Fetch en vivo: 2026-09-18T13:37:47Z.
+#   inferencia). Fetch en vivo: 2026-09-23T20:47:27Z.
 # - Anthropic: https://claude.com/pricing (pagina oficial de precios,
 #   sin fecha de actualizacion publicada en la propia pagina -- fecha
 #   de verificacion aqui es la fecha en que Claude Code la consulto,
@@ -104,45 +113,45 @@ VERIFIED_MODEL_PRICING: dict[str, ModelPricing] = {
         input_usd_per_1k=0.002, output_usd_per_1k=0.01, verified=True,
         source="https://openrouter.ai/api/v1/models (id=anthropic/claude-sonnet-5, "
                "canonical_slug=anthropic/claude-sonnet-5-20260630)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
     ),
     "deepseek/deepseek-v4-pro": ModelPricing(
-        input_usd_per_1k=0.0016, output_usd_per_1k=0.0032, verified=True,
+        input_usd_per_1k=0.000946386, output_usd_per_1k=0.001892772, verified=True,
         source="https://openrouter.ai/api/v1/models (id=deepseek/deepseek-v4-pro, "
                "canonical_slug=deepseek/deepseek-v4-pro-20260423)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
     ),
     "nvidia/nemotron-3-ultra-550b-a55b": ModelPricing(
-        input_usd_per_1k=0.000625, output_usd_per_1k=0.003125, verified=True,
+        input_usd_per_1k=0.0006, output_usd_per_1k=0.0024, verified=True,
         source="https://openrouter.ai/api/v1/models (id=nvidia/nemotron-3-ultra-550b-a55b, "
                "canonical_slug=nvidia/nemotron-3-ultra-550b-a55b-20260604)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
     ),
     "google/gemini-2.5-pro-preview": ModelPricing(
         input_usd_per_1k=0.00125, output_usd_per_1k=0.01, verified=True,
         source="https://openrouter.ai/api/v1/models (id=google/gemini-2.5-pro-preview, "
                "canonical_slug=google/gemini-2.5-pro-preview-06-05; tarifa BASE, "
                "<200K prompt tokens -- ver nota de tarificacion escalonada arriba)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
     ),
     "anthropic/claude-opus-5": ModelPricing(
         input_usd_per_1k=0.005, output_usd_per_1k=0.025, verified=True,
         source="https://openrouter.ai/api/v1/models (id=anthropic/claude-opus-5, "
                "canonical_slug=anthropic/claude-opus-5-20260723)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
     ),
     "x-ai/grok-4.5": ModelPricing(
         input_usd_per_1k=0.002, output_usd_per_1k=0.006, verified=True,
         source="https://openrouter.ai/api/v1/models (id=x-ai/grok-4.5, "
                "canonical_slug=x-ai/grok-4.5-20260708; tarifa BASE, <200K prompt "
                "tokens -- ver nota de tarificacion escalonada arriba)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
     ),
     "meta-llama/llama-4-maverick": ModelPricing(
         input_usd_per_1k=0.0001875, output_usd_per_1k=0.0006525, verified=True,
         source="https://openrouter.ai/api/v1/models (id=meta-llama/llama-4-maverick, "
                "canonical_slug=meta-llama/llama-4-maverick-17b-128e-instruct)",
-        verified_at="2026-09-18T13:37:47Z",
+        verified_at="2026-09-23T20:47:27Z",
     ),
     # --- Fallback directo Anthropic (bare, via self._anthropic_client --
     #     NO pasa por OpenRouter, claves de dict SIN prefijo de proveedor,
@@ -153,21 +162,21 @@ VERIFIED_MODEL_PRICING: dict[str, ModelPricing] = {
         source="https://claude.com/pricing ('Claude Sonnet 5': $2/MTok input, "
                "$10/MTok output) -- cruzado con anthropic/claude-sonnet-5 de "
                "OpenRouter, mismas cifras exactas",
-        verified_at="2026-09-18T13:41:00Z",
+        verified_at="2026-09-23T20:52:00Z",
     ),
     "claude-opus-5": ModelPricing(
         input_usd_per_1k=0.005, output_usd_per_1k=0.025, verified=True,
         source="https://claude.com/pricing ('Claude Opus 5': $5/MTok input, "
                "$25/MTok output) -- cruzado con anthropic/claude-opus-5 de "
                "OpenRouter, mismas cifras exactas",
-        verified_at="2026-09-18T13:41:00Z",
+        verified_at="2026-09-23T20:52:00Z",
     ),
     "claude-sonnet-4-6": ModelPricing(
         input_usd_per_1k=0.003, output_usd_per_1k=0.015, verified=True,
         source="https://claude.com/pricing ('Claude Sonnet 4.6': $3/MTok input, "
                "$15/MTok output) -- cruzado con anthropic/claude-sonnet-4.6 de "
                "OpenRouter, mismas cifras exactas",
-        verified_at="2026-09-18T13:41:00Z",
+        verified_at="2026-09-23T20:52:00Z",
     ),
 }
 
